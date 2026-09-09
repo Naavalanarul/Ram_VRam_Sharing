@@ -26,6 +26,9 @@ public:
 
     // Call this to update the dynamic metrics (RAM/VRAM) before the next broadcast
     void update_metrics(uint64_t free_ram, uint64_t free_vram);
+    
+    // Set pool membership state - when false, announce zero capacity
+    void set_pool_joined(bool joined) { pool_joined_ = joined; }
 
 private:
     static void on_timer(uv_timer_t* handle);
@@ -49,6 +52,7 @@ private:
     int interval_ms_;
     
     bool is_running_ = false;
+    bool pool_joined_ = true;  // Default to joined for backward compatibility
     struct sockaddr_in dest_addr_;
 };
 

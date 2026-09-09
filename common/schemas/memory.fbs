@@ -15,7 +15,8 @@ enum StatusCode : uint8 {
   CHECKSUM_MISMATCH = 3,
   INVALID_HANDLE = 4,
   OUT_OF_MEMORY = 5,
-  VERSION_MISMATCH = 6
+  VERSION_MISMATCH = 6,
+  PERMISSION_DENIED = 7
 }
 
 table MemoryRequest {

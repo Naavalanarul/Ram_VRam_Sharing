@@ -7,9 +7,11 @@
 namespace meminfo {
 namespace discovery {
 
+class DiscoveryDaemon; // Forward declaration
+
 class ControlSocket {
 public:
-    ControlSocket(PeerTable* peer_table, const std::string& socket_path);
+    ControlSocket(PeerTable* peer_table, const std::string& socket_path, DiscoveryDaemon* daemon);
     ~ControlSocket();
     
     void start();
@@ -19,6 +21,7 @@ private:
     void handle_request(const std::vector<uint8_t>& req, std::vector<uint8_t>& resp);
 
     PeerTable* peer_table_;
+    DiscoveryDaemon* daemon_;
     std::string socket_path_;
     std::unique_ptr<platform::ILocalIpc> ipc_;
 };

@@ -30,17 +30,17 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     stop_async_.data = this;
     
     // Generate UUID if not present (simple placeholder)
-    node_id_t local_id = generate_uuid();
+    local_id_ = generate_uuid();
     
-    std::string hostname = "localhost";
+    local_hostname_ = "localhost";
     char host_buf[256];
     if (gethostname(host_buf, sizeof(host_buf)) == 0) {
-        hostname = host_buf;
+        local_hostname_ = host_buf;
     }
     
-    std::string listen_addr = config_.get<std::string>("discovery", "listen_address", "0.0.0.0");
-    uint16_t memory_port = config_.get<int>("discovery", "memory_port", 9200);
-    uint16_t gpu_port = config_.get<int>("discovery", "gpu_port", 9300);
+    listen_address_ = config_.get<std::string>("discovery", "listen_address", "0.0.0.0");
+    memory_port_ = config_.get<int>("discovery", "memory_port", 9200);
+    gpu_port_ = config_.get<int>("discovery", "gpu_port", 9300);
     
     std::string mcast_ip = config_.get<std::string>("discovery", "multicast_group", "239.255.73.77");
     int mcast_port = config_.get<int>("discovery", "multicast_port", 9100);
@@ -48,13 +48,13 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     
     peer_table_.set_ttl_seconds(config_.get<int>("discovery", "peer_ttl_seconds", 10));
     
-    announcer_ = std::make_unique<Announcer>(&loop_, local_id, hostname, listen_addr, 
-                                             memory_port, gpu_port, mcast_ip, mcast_port, interval_ms);
+    announcer_ = std::make_unique<Announcer>(&loop_, local_id_, local_hostname_, listen_address_, 
+                                             memory_port_, gpu_port_, mcast_ip, mcast_port, interval_ms);
                                              
-    listener_ = std::make_unique<Listener>(&loop_, &peer_table_, mcast_ip, mcast_port, listen_addr);
+    listener_ = std::make_unique<Listener>(&loop_, &peer_table_, mcast_ip, mcast_port, listen_address_);
     
     std::string sock_path = config_.get<std::string>("discovery", "control_socket", "/var/run/meminfo_discovery.sock");
-    control_socket_ = std::make_unique<ControlSocket>(&peer_table_, sock_path);
+    control_socket_ = std::make_unique<ControlSocket>(&peer_table_, sock_path, this);
     
     memory_monitor_ = platform::create_memory_monitor();
     
@@ -93,6 +93,7 @@ void DiscoveryDaemon::run() {
     spdlog::info("Starting discoveryd...");
     
     announcer_->start();
+    update_announcer_state();
     listener_->start();
     control_socket_->start();
     
@@ -114,6 +115,8 @@ void DiscoveryDaemon::run() {
         // Simple mock for VRAM
         uint64_t free_vram = 0; 
         
+        self->free_ram_ = free_ram;
+        self->free_vram_ = free_vram;
         self->announcer_->update_metrics(free_ram, free_vram);
     }, 1000, 1000);
     
@@ -134,6 +137,28 @@ void DiscoveryDaemon::stop() {
     if (!is_running_) return;
     spdlog::info("Stopping discoveryd...");
     uv_async_send(&stop_async_);
+}
+
+void DiscoveryDaemon::join_pool() {
+    if (!pool_joined_) {
+        pool_joined_ = true;
+        spdlog::info("Joined pool");
+        update_announcer_state();
+    }
+}
+
+void DiscoveryDaemon::leave_pool() {
+    if (pool_joined_) {
+        pool_joined_ = false;
+        spdlog::info("Left pool");
+        update_announcer_state();
+    }
+}
+
+void DiscoveryDaemon::update_announcer_state() {
+    if (announcer_) {
+        announcer_->set_pool_joined(pool_joined_);
+    }
 }
 
 } // namespace discovery

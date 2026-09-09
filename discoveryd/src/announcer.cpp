@@ -85,6 +85,10 @@ struct SendReqCtx {
 void Announcer::on_timer(uv_timer_t* handle) {
     auto* self = static_cast<Announcer*>(handle->data);
     
+    // If not joined to pool, announce zero capacity so peers don't route allocations here
+    uint64_t announce_ram = self->pool_joined_ ? self->free_ram_ : 0;
+    uint64_t announce_vram = self->pool_joined_ ? self->free_vram_ : 0;
+    
     flatbuffers::FlatBufferBuilder builder;
     auto fb_node_id = builder.CreateVector(self->local_id_.data(), self->local_id_.size());
     auto fb_hostname = builder.CreateString(self->local_hostname_);
@@ -97,8 +101,8 @@ void Announcer::on_timer(uv_timer_t* handle) {
     ab.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
     ab.add_node_id(fb_node_id);
     ab.add_hostname(fb_hostname);
-    ab.add_free_ram_bytes(self->free_ram_);
-    ab.add_free_vram_bytes(self->free_vram_);
+    ab.add_free_ram_bytes(announce_ram);
+    ab.add_free_vram_bytes(announce_vram);
     ab.add_heartbeat_ts(heartbeat_ts);
     ab.add_memory_port(self->memory_port_);
     ab.add_gpu_port(self->gpu_port_);

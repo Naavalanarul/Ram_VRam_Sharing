@@ -17,7 +17,7 @@ TEST(PageTrackerTest, AllocateAndFree) {
     EXPECT_GT(h1, 0);
     EXPECT_EQ(alloc.free_pages_count(), 8);
     
-    tracker.free(h1);
+    tracker.free(h1, 1);
     EXPECT_EQ(alloc.free_pages_count(), 10);
 }
 
@@ -29,15 +29,15 @@ TEST(PageTrackerTest, WriteAndReadAcrossPages) {
     
     std::vector<uint8_t> write_data(5000, 0xAA);
     // Write 5000 bytes starting at offset 100. This will span across 2 pages
-    tracker.write(h1, 100, write_data.data(), write_data.size());
+    tracker.write(h1, 100, write_data.data(), write_data.size(), 1);
     
     std::vector<uint8_t> read_data(5000, 0);
-    tracker.read(h1, 100, read_data.data(), read_data.size());
+    tracker.read(h1, 100, read_data.data(), read_data.size(), 1);
     
     EXPECT_EQ(read_data, write_data);
     
     // Test boundaries
-    EXPECT_THROW(tracker.write(h1, 8000, write_data.data(), 1), std::out_of_range);
+    EXPECT_THROW(tracker.write(h1, 8000, write_data.data(), 1, 1), std::out_of_range);
 }
 
 TEST(PageTrackerTest, OwnerTracking) {
@@ -56,7 +56,21 @@ TEST(PageTrackerTest, OwnerTracking) {
     
     EXPECT_EQ(alloc.free_pages_count(), 10);
     uint8_t dummy = 0;
-    EXPECT_THROW(tracker.read(h1, 0, &dummy, 1), std::invalid_argument);
+    EXPECT_THROW(tracker.read(h1, 0, &dummy, 1, 1), std::invalid_argument);
+}
+
+TEST(PageTrackerTest, PermissionDenied) {
+    SlabAllocator alloc(4096 * 10, 4096);
+    PageTracker tracker(&alloc);
+    
+    meminfo::handle_t h1 = tracker.allocate(100);
+    tracker.assign_owner(h1, 42);
+    
+    // Try to access from different owner
+    std::vector<uint8_t> write_data(10, 0xAA);
+    EXPECT_THROW(tracker.write(h1, 0, write_data.data(), write_data.size(), 99), PermissionDeniedError);
+    EXPECT_THROW(tracker.read(h1, 0, write_data.data(), write_data.size(), 99), PermissionDeniedError);
+    EXPECT_THROW(tracker.free(h1, 99), PermissionDeniedError);
 }
 
 TEST(PageTrackerTest, ConcurrentFreeAndWrite) {
@@ -70,7 +84,7 @@ TEST(PageTrackerTest, ConcurrentFreeAndWrite) {
     std::thread t1([&]() {
         for (int i=0; i<100; ++i) {
             try {
-                tracker.write(h1, 0, write_data.data(), write_data.size());
+                tracker.write(h1, 0, write_data.data(), write_data.size(), 1);
             } catch (const std::exception&) {
                 // It is expected to throw after free
             }
@@ -79,7 +93,7 @@ TEST(PageTrackerTest, ConcurrentFreeAndWrite) {
     
     // Thread 2: frees the handle
     std::thread t2([&]() {
-        tracker.free(h1);
+        tracker.free(h1, 1);
     });
     
     t1.join();

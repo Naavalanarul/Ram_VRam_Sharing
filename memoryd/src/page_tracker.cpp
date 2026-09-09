@@ -11,6 +11,16 @@ PageTracker::PageTracker(SlabAllocator* allocator)
     }
 }
 
+void PageTracker::check_ownership(handle_t handle, uint64_t owner_id) const {
+    auto it = allocations_.find(handle);
+    if (it == allocations_.end()) {
+        throw std::invalid_argument("Invalid handle");
+    }
+    if (it->second.owner_id != 0 && it->second.owner_id != owner_id) {
+        throw PermissionDeniedError();
+    }
+}
+
 handle_t PageTracker::allocate(size_t size) {
     if (size == 0) return 0;
     
@@ -25,8 +35,9 @@ handle_t PageTracker::allocate(size_t size) {
     return h;
 }
 
-void PageTracker::free(handle_t handle) {
+void PageTracker::free(handle_t handle, uint64_t owner_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+    check_ownership(handle, owner_id);
     auto it = allocations_.find(handle);
     if (it != allocations_.end()) {
         allocator_->free_pages(it->second.pages);
@@ -34,17 +45,15 @@ void PageTracker::free(handle_t handle) {
     }
 }
 
-void PageTracker::write(handle_t handle, size_t offset, const uint8_t* data, size_t size) {
+void PageTracker::write(handle_t handle, size_t offset, const uint8_t* data, size_t size, uint64_t owner_id) {
     if (size == 0) return;
     
     std::vector<size_t> pages;
     size_t total_size = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_ownership(handle, owner_id);
         auto it = allocations_.find(handle);
-        if (it == allocations_.end()) {
-            throw std::invalid_argument("Invalid handle");
-        }
         pages = it->second.pages;
         total_size = it->second.total_size;
     }
@@ -67,17 +76,15 @@ void PageTracker::write(handle_t handle, size_t offset, const uint8_t* data, siz
     }
 }
 
-void PageTracker::read(handle_t handle, size_t offset, uint8_t* out_data, size_t size) const {
+void PageTracker::read(handle_t handle, size_t offset, uint8_t* out_data, size_t size, uint64_t owner_id) const {
     if (size == 0) return;
     
     std::vector<size_t> pages;
     size_t total_size = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_ownership(handle, owner_id);
         auto it = allocations_.find(handle);
-        if (it == allocations_.end()) {
-            throw std::invalid_argument("Invalid handle");
-        }
         pages = it->second.pages;
         total_size = it->second.total_size;
     }

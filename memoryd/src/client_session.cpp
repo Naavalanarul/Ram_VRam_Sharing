@@ -1,6 +1,7 @@
 #include <meminfo/common/types.h>
 
 #include <meminfo/memory/client_session.h>
+#include <meminfo/memory/page_tracker.h>
 #include <meminfo/common/crc32c.h>
 #include <meminfo/common/protocol_version.h>
 #include <memory_generated.h>
@@ -96,7 +97,7 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
                     break;
                     
                 case meminfo::memory::OpCode_FREE:
-                    page_tracker_->free(req->handle());
+                    page_tracker_->free(req->handle(), session_id_);
                     break;
                     
                 case meminfo::memory::OpCode_WRITE: {
@@ -106,7 +107,7 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
                             status = meminfo::memory::StatusCode_CHECKSUM_MISMATCH;
                             message = "CRC32C mismatch";
                         } else {
-                            page_tracker_->write(req->handle(), req->offset(), req->data()->data(), req->data()->size());
+                            page_tracker_->write(req->handle(), req->offset(), req->data()->data(), req->data()->size(), session_id_);
                         }
                     }
                     break;
@@ -114,7 +115,7 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
                     
                 case meminfo::memory::OpCode_READ: {
                     read_data.resize(req->size());
-                    page_tracker_->read(req->handle(), req->offset(), read_data.data(), req->size());
+                    page_tracker_->read(req->handle(), req->offset(), read_data.data(), req->size(), session_id_);
                     checksum = crc32c(read_data.data(), read_data.size());
                     break;
                 }
@@ -123,6 +124,9 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
                     // Just return OK
                     break;
             }
+        } catch (const PermissionDeniedError& e) {
+            status = meminfo::memory::StatusCode_PERMISSION_DENIED;
+            message = e.what();
         } catch (const std::invalid_argument& e) {
             status = meminfo::memory::StatusCode_INVALID_HANDLE;
             message = e.what();
