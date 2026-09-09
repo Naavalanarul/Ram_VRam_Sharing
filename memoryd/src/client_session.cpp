@@ -2,11 +2,9 @@
 
 #include <meminfo/memory/client_session.h>
 #include <meminfo/memory/page_tracker.h>
-#include <meminfo/common/crc32c.h>
-#include <meminfo/common/protocol_version.h>
+#include <meminfo/memory/memory_protocol.h>
 #include <memory_generated.h>
 #include <spdlog/spdlog.h>
-#include <iostream>
 
 namespace meminfo {
 namespace memory {
@@ -69,93 +67,16 @@ void ClientSession::process_buffer() {
 }
 
 void ClientSession::handle_request(const uint8_t* data, size_t size) {
-    flatbuffers::Verifier verifier(data, size);
-    if (!meminfo::memory::VerifySizePrefixedMemoryRequestBuffer(verifier)) {
-        spdlog::warn("Invalid MemoryRequest buffer received");
+    // Delegate to MemoryProtocol for request processing
+    auto response = MemoryProtocol::process_request(page_tracker_, session_id_, data, size);
+    
+    // Empty response means invalid protocol - close connection
+    if (response.empty()) {
         uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
         return;
     }
     
-    const auto* req = meminfo::memory::GetSizePrefixedMemoryRequest(data);
-    
-    flatbuffers::FlatBufferBuilder builder;
-    meminfo::memory::StatusCode status = meminfo::memory::StatusCode_OK;
-    std::string message = "OK";
-    uint64_t handle = 0;
-    std::vector<uint8_t> read_data;
-    uint32_t checksum = 0;
-    
-    if (!check_protocol_version(req->protocol_version())) {
-        status = meminfo::memory::StatusCode_VERSION_MISMATCH;
-        message = "Protocol version mismatch";
-    } else {
-        try {
-            switch (req->op()) {
-                case meminfo::memory::OpCode_ALLOC:
-                    handle = page_tracker_->allocate(req->size());
-                    page_tracker_->assign_owner(handle, session_id_);
-                    break;
-                    
-                case meminfo::memory::OpCode_FREE:
-                    page_tracker_->free(req->handle(), session_id_);
-                    break;
-                    
-                case meminfo::memory::OpCode_WRITE: {
-                    if (req->data()) {
-                        uint32_t computed_crc = crc32c(req->data()->data(), req->data()->size());
-                        if (computed_crc != req->checksum()) {
-                            status = meminfo::memory::StatusCode_CHECKSUM_MISMATCH;
-                            message = "CRC32C mismatch";
-                        } else {
-                            page_tracker_->write(req->handle(), req->offset(), req->data()->data(), req->data()->size(), session_id_);
-                        }
-                    }
-                    break;
-                }
-                    
-                case meminfo::memory::OpCode_READ: {
-                    read_data.resize(req->size());
-                    page_tracker_->read(req->handle(), req->offset(), read_data.data(), req->size(), session_id_);
-                    checksum = crc32c(read_data.data(), read_data.size());
-                    break;
-                }
-                    
-                case meminfo::memory::OpCode_PING:
-                    // Just return OK
-                    break;
-            }
-        } catch (const PermissionDeniedError& e) {
-            status = meminfo::memory::StatusCode_PERMISSION_DENIED;
-            message = e.what();
-        } catch (const std::invalid_argument& e) {
-            status = meminfo::memory::StatusCode_INVALID_HANDLE;
-            message = e.what();
-        } catch (const std::bad_alloc& e) {
-            status = meminfo::memory::StatusCode_OUT_OF_MEMORY;
-            message = "Not enough contiguous free pages";
-        } catch (const std::exception& e) {
-            status = meminfo::memory::StatusCode_ERROR_GENERIC;
-            message = e.what();
-        }
-    }
-    
-    auto fb_msg = builder.CreateString(message);
-    auto fb_data = read_data.empty() ? 0 : builder.CreateVector(read_data);
-    
-    meminfo::memory::MemoryResponseBuilder mrb(builder);
-    mrb.add_request_id(req->request_id());
-    mrb.add_status(status);
-    mrb.add_message(fb_msg);
-    if (req->op() == meminfo::memory::OpCode_ALLOC) {
-        mrb.add_handle(handle);
-    }
-    if (req->op() == meminfo::memory::OpCode_READ && status == meminfo::memory::StatusCode_OK) {
-        mrb.add_data(fb_data);
-        mrb.add_checksum(checksum);
-    }
-    builder.FinishSizePrefixed(mrb.Finish());
-    
-    send_response(builder.GetBufferPointer(), builder.GetSize());
+    send_response(response.data(), response.size());
 }
 
 struct WriteReqCtx {

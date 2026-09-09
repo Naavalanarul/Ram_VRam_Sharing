@@ -6,6 +6,8 @@
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 #include <queue>
+#include <algorithm>
+#include <chrono>
 
 namespace meminfo {
 namespace client {
@@ -16,7 +18,6 @@ MemoryClient::MemoryClient(size_t max_local_bytes, const std::string& discovery_
     memory_monitor_ = platform::create_memory_monitor();
     memory_monitor_->set_pressure_callback([this]() {
         spdlog::warn("MemoryClient: High memory pressure detected by OS! Aggressively evicting...");
-        // On pressure, try to evict half our cache, or at least 1MB
         size_t to_evict = std::max(cache_.current_size() / 2, (size_t)1048576);
         this->evict_if_needed(to_evict);
     });
@@ -92,7 +93,7 @@ void MemoryClient::add_peer_and_connect(const std::string& ip, int port) {
     uv_connect_t* conn = new uv_connect_t;
     conn->data = peer.get();
     uv_tcp_connect(conn, peer->socket, reinterpret_cast<const struct sockaddr*>(&dest), [](uv_connect_t* req, int status) {
-        auto* p = static_cast<RemotePeer*>(req->data);
+        auto* p = static_cast<MemoryClient::RemotePeer*>(req->data);
         if (status == 0) {
             p->connected = true;
             uv_read_start(reinterpret_cast<uv_stream_t*>(p->socket), 
@@ -105,7 +106,6 @@ void MemoryClient::add_peer_and_connect(const std::string& ip, int port) {
         delete req;
     });
     
-    if (!current_peer_) current_peer_ = peer.get();
     peers_.push_back(std::move(peer));
 }
 
@@ -149,54 +149,76 @@ void MemoryClient::connect_to_peers() {
     }
 }
 
-void MemoryClient::on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
-    auto* peer = static_cast<RemotePeer*>(stream->data);
+void MemoryClient::refresh_peer_capacity() {
+    auto ipc = platform::create_local_ipc();
     
-    if (nread > 0) {
-        peer->read_buffer.insert(peer->read_buffer.end(), buf->base, buf->base + nread);
-        
-        while (peer->read_buffer.size() >= 4) {
-            uint32_t msg_size = flatbuffers::GetPrefixedSize(peer->read_buffer.data());
-            // Cap msg_size to prevent overflow (Bug #7 fix)
-            if (msg_size > 64 * 1024 * 1024) {
-                uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
-                return;
-            }
-            if (peer->read_buffer.size() - 4 >= msg_size) {
-                flatbuffers::Verifier verifier(peer->read_buffer.data(), msg_size + 4);
-                if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
-                    uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
-                    return;
-                }
-                const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(peer->read_buffer.data());
-                
-                std::shared_ptr<RequestContext> req_ctx;
-                {
-                    std::lock_guard<std::mutex> lock(peer->client->requests_mutex_);
-                    auto it = peer->client->pending_requests_.find(resp->request_id());
-                    if (it != peer->client->pending_requests_.end()) {
-                        req_ctx = it->second;
-                        peer->client->pending_requests_.erase(it);
+    flatbuffers::FlatBufferBuilder builder;
+    meminfo::control::ControlRequestBuilder crb(builder);
+    crb.add_command(meminfo::control::ControlCommand_LIST_PEERS);
+    builder.FinishSizePrefixed(crb.Finish());
+    
+    std::vector<uint8_t> req(builder.GetBufferPointer(), builder.GetBufferPointer() + builder.GetSize());
+    
+    try {
+        auto resp_buf = ipc->send_request(discovery_socket_, req);
+        if (!resp_buf.empty()) {
+            const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::control::ControlResponse>(resp_buf.data());
+            if (resp && resp->peers()) {
+                auto now = std::chrono::steady_clock::now();
+                for (const auto* p : *resp->peers()) {
+                    if (p->memory_port() > 0 && p->address()) {
+                        std::string addr = p->address()->str();
+                        uint16_t port = p->memory_port();
+                        
+                        // Find matching peer
+                        for (auto& peer : peers_) {
+                            if (peer->ip == addr && peer->port == port) {
+                                peer->free_ram_bytes = p->free_ram_bytes();
+                                peer->free_vram_bytes = p->free_vram_bytes();
+                                peer->last_capacity_update = now;
+                                break;
+                            }
+                        }
                     }
                 }
-                
-                if (req_ctx) {
-                    std::vector<uint8_t> result;
-                    // Append full response buffer for decoding by the caller
-                    result.assign(peer->read_buffer.data(), peer->read_buffer.data() + msg_size + 4);
-                    req_ctx->promise.set_value(std::move(result));
-                }
-                
-                peer->read_buffer.erase(peer->read_buffer.begin(), peer->read_buffer.begin() + msg_size + 4);
-            } else {
-                break;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to refresh peer capacity: {}", e.what());
+    }
+}
+
+MemoryClient::RemotePeer* MemoryClient::select_best_peer(size_t size_needed) {
+    // Refresh capacity if TTL expired
+    auto now = std::chrono::steady_clock::now();
+    bool need_refresh = true;
+    for (const auto& peer : peers_) {
+        if (peer->connected && now - peer->last_capacity_update < PEER_CAPACITY_TTL) {
+            need_refresh = false;
+            break;
+        }
+    }
+    if (need_refresh) {
+        refresh_peer_capacity();
+    }
+    
+    // Find connected peer with most free RAM that can fit the allocation
+    MemoryClient::RemotePeer* best_peer = nullptr;
+    uint64_t best_free = 0;
+    
+    for (auto& peer : peers_) {
+        if (peer->connected && peer->free_ram_bytes >= size_needed) {
+            if (peer->free_ram_bytes > best_free) {
+                best_free = peer->free_ram_bytes;
+                best_peer = peer.get();
             }
         }
     }
-    if (buf->base) delete[] buf->base;
+    
+    return best_peer;
 }
 
-std::vector<uint8_t> MemoryClient::sync_remote_call(RemotePeer* peer, const uint8_t* payload, size_t size, uint64_t request_id) {
+std::vector<uint8_t> MemoryClient::sync_remote_call(MemoryClient::RemotePeer* peer, const uint8_t* payload, size_t size, uint64_t request_id) {
     auto req_ctx = std::make_shared<RequestContext>();
     req_ctx->request_id = request_id;
     auto future = req_ctx->promise.get_future();
@@ -231,6 +253,323 @@ handle_t MemoryClient::allocate(size_t size) {
     return handle;
 }
 
+void MemoryClient::allocate_remote(handle_t handle, size_t size) {
+    // Try to allocate on best peer, with fallback to other peers
+    std::vector<MemoryClient::RemotePeer*> candidates;
+    
+    // Get all connected peers sorted by free RAM (descending)
+    for (auto& peer : peers_) {
+        if (peer->connected) {
+            candidates.push_back(peer.get());
+        }
+    }
+    
+    std::sort(candidates.begin(), candidates.end(), [](MemoryClient::RemotePeer* a, MemoryClient::RemotePeer* b) {
+        return a->free_ram_bytes > b->free_ram_bytes;
+    });
+    
+    RemoteAllocation alloc;
+    alloc.size = size;
+    alloc.is_striped = false;
+    
+    bool allocated = false;
+    
+    // First try: single peer allocation
+    for (MemoryClient::RemotePeer* peer : candidates) {
+        if (peer->free_ram_bytes >= size) {
+            uint64_t req_id = next_request_id_++;
+            flatbuffers::FlatBufferBuilder builder;
+            meminfo::memory::MemoryRequestBuilder mrb(builder);
+            mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+            mrb.add_request_id(req_id);
+            mrb.add_op(meminfo::memory::OpCode_ALLOC);
+            mrb.add_size(size);
+            builder.FinishSizePrefixed(mrb.Finish());
+            
+            try {
+                auto resp_data = sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+                if (!resp_data.empty()) {
+                    flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+                    if (verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                        const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
+                        if (resp->status() == meminfo::memory::StatusCode_OK) {
+                            alloc.remote_handle = resp->handle();
+                            alloc.peer = peer;
+                            allocated = true;
+                            spdlog::info("Allocated {} bytes on peer {}:{} (remote handle {})", size, peer->ip, peer->port, resp->handle());
+                            break;
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to allocate on peer {}:{}: {}", peer->ip, peer->port, e.what());
+                // Continue to next peer
+            }
+        }
+    }
+    
+    // Second try: striping across multiple peers if single allocation failed
+    if (!allocated && candidates.size() > 1) {
+        spdlog::info("Single peer allocation failed, attempting striping across {} peers", candidates.size());
+        
+        size_t remaining = size;
+        size_t current_offset = 0;
+        
+        for (MemoryClient::RemotePeer* peer : candidates) {
+            if (remaining == 0) break;
+            
+            size_t chunk_size = std::min<size_t>(remaining, static_cast<size_t>(peer->free_ram_bytes));
+            if (chunk_size == 0) continue;
+            
+            uint64_t req_id = next_request_id_++;
+            flatbuffers::FlatBufferBuilder builder;
+            meminfo::memory::MemoryRequestBuilder mrb(builder);
+            mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+            mrb.add_request_id(req_id);
+            mrb.add_op(meminfo::memory::OpCode_ALLOC);
+            mrb.add_size(chunk_size);
+            builder.FinishSizePrefixed(mrb.Finish());
+            
+            try {
+                auto resp_data = sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+                if (!resp_data.empty()) {
+                    flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+                    if (verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                        const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
+                        if (resp->status() == meminfo::memory::StatusCode_OK) {
+                            RemoteAllocation::Stripe stripe;
+                            stripe.remote_handle = resp->handle();
+                            stripe.offset = current_offset;
+                            stripe.length = chunk_size;
+                            stripe.peer = peer;
+                            alloc.stripes.push_back(std::move(stripe));
+                            current_offset += chunk_size;
+                            remaining -= chunk_size;
+                            spdlog::info("Stripe allocated: {} bytes on peer {}:{} (remote handle {})", chunk_size, peer->ip, peer->port, resp->handle());
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to allocate stripe on peer {}:{}: {}", peer->ip, peer->port, e.what());
+            }
+        }
+        
+        if (remaining == 0 && !alloc.stripes.empty()) {
+            alloc.is_striped = true;
+            allocated = true;
+            spdlog::info("Successfully striped {} bytes across {} peers", size, alloc.stripes.size());
+        }
+    }
+    
+    if (!allocated) {
+        throw std::runtime_error("Failed to allocate on any peer: out of memory on all peers");
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(remote_mutex_);
+        remote_handles_[handle] = std::move(alloc);
+    }
+}
+
+void MemoryClient::free_remote(const RemoteAllocation& alloc) {
+    if (alloc.is_striped) {
+        for (const auto& stripe : alloc.stripes) {
+            if (!stripe.peer || !stripe.peer->connected) continue;
+            
+            uint64_t req_id = next_request_id_++;
+            flatbuffers::FlatBufferBuilder builder;
+            meminfo::memory::MemoryRequestBuilder mrb(builder);
+            mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+            mrb.add_request_id(req_id);
+            mrb.add_op(meminfo::memory::OpCode_FREE);
+            mrb.add_handle(stripe.remote_handle);
+            builder.FinishSizePrefixed(mrb.Finish());
+            
+            try {
+                sync_remote_call(stripe.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to free stripe on peer: {}", e.what());
+            }
+        }
+    } else {
+        if (!alloc.peer || !alloc.peer->connected) return;
+        
+        uint64_t req_id = next_request_id_++;
+        flatbuffers::FlatBufferBuilder builder;
+        meminfo::memory::MemoryRequestBuilder mrb(builder);
+        mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+        mrb.add_request_id(req_id);
+        mrb.add_op(meminfo::memory::OpCode_FREE);
+        mrb.add_handle(alloc.remote_handle);
+        builder.FinishSizePrefixed(mrb.Finish());
+        
+        try {
+            sync_remote_call(alloc.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to free remote allocation: {}", e.what());
+        }
+    }
+}
+
+void MemoryClient::write_remote(const RemoteAllocation& alloc, size_t offset, const uint8_t* data, size_t size) {
+    if (alloc.is_striped) {
+        size_t data_offset = 0;
+        while (data_offset < size) {
+            for (const auto& stripe : alloc.stripes) {
+                if (data_offset >= size) break;
+                if (offset + data_offset < stripe.offset || offset + data_offset >= stripe.offset + stripe.length) {
+                    continue; // This stripe doesn't cover this range
+                }
+                
+                size_t stripe_write_offset = (offset + data_offset) - stripe.offset;
+                size_t stripe_write_size = std::min<size_t>(size - data_offset, stripe.length - stripe_write_offset);
+                
+                uint64_t req_id = next_request_id_++;
+                flatbuffers::FlatBufferBuilder builder;
+                auto fb_data = builder.CreateVector(data + data_offset, stripe_write_size);
+                meminfo::memory::MemoryRequestBuilder mrb(builder);
+                mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+                mrb.add_request_id(req_id);
+                mrb.add_op(meminfo::memory::OpCode_WRITE);
+                mrb.add_handle(stripe.remote_handle);
+                mrb.add_offset(stripe_write_offset);
+                mrb.add_data(fb_data);
+                mrb.add_checksum(crc32c(data + data_offset, stripe_write_size));
+                builder.FinishSizePrefixed(mrb.Finish());
+                
+                try {
+                    sync_remote_call(stripe.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+                } catch (const std::exception& e) {
+                    throw std::runtime_error("Failed to write stripe: " + std::string(e.what()));
+                }
+                
+                data_offset += stripe_write_size;
+            }
+        }
+    } else {
+        if (!alloc.peer || !alloc.peer->connected) throw std::runtime_error("Peer not connected");
+        
+        uint64_t req_id = next_request_id_++;
+        flatbuffers::FlatBufferBuilder builder;
+        auto fb_data = builder.CreateVector(data, size);
+        meminfo::memory::MemoryRequestBuilder mrb(builder);
+        mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+        mrb.add_request_id(req_id);
+        mrb.add_op(meminfo::memory::OpCode_WRITE);
+        mrb.add_handle(alloc.remote_handle);
+        mrb.add_offset(offset);
+        mrb.add_data(fb_data);
+        mrb.add_checksum(crc32c(data, size));
+        builder.FinishSizePrefixed(mrb.Finish());
+        
+        sync_remote_call(alloc.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+    }
+}
+
+std::vector<uint8_t> MemoryClient::read_remote(const RemoteAllocation& alloc, size_t offset, size_t size) {
+    std::vector<uint8_t> result(size);
+    
+    if (alloc.is_striped) {
+        size_t result_offset = 0;
+        while (result_offset < size) {
+            for (const auto& stripe : alloc.stripes) {
+                if (result_offset >= size) break;
+                if (offset + result_offset < stripe.offset || offset + result_offset >= stripe.offset + stripe.length) {
+                    continue; // This stripe doesn't cover this range
+                }
+                
+                size_t stripe_read_offset = (offset + result_offset) - stripe.offset;
+                size_t stripe_read_size = std::min(size - result_offset, stripe.length - stripe_read_offset);
+                
+                uint64_t req_id = next_request_id_++;
+                flatbuffers::FlatBufferBuilder builder;
+                meminfo::memory::MemoryRequestBuilder mrb(builder);
+                mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+                mrb.add_request_id(req_id);
+                mrb.add_op(meminfo::memory::OpCode_READ);
+                mrb.add_handle(stripe.remote_handle);
+                mrb.add_offset(stripe_read_offset);
+                mrb.add_size(stripe_read_size);
+                builder.FinishSizePrefixed(mrb.Finish());
+                
+                try {
+                    auto resp_data = sync_remote_call(stripe.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+                    if (resp_data.empty()) throw std::runtime_error("Empty response");
+                    
+                    flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+                    if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                        throw std::runtime_error("Invalid MemoryResponse buffer");
+                    }
+                    const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
+                    
+                    if (resp->status() != meminfo::memory::StatusCode_OK || !resp->data()) {
+                        throw std::runtime_error("Failed to read from remote peer");
+                    }
+                    
+                    std::vector<uint8_t> stripe_data(resp->data()->begin(), resp->data()->end());
+                    std::copy(stripe_data.begin(), stripe_data.end(), result.begin() + result_offset);
+                    result_offset += stripe_read_size;
+                    
+                    // Free from remote after read
+                    req_id = next_request_id_++;
+                    builder.Clear();
+                    meminfo::memory::MemoryRequestBuilder mrb2(builder);
+                    mrb2.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+                    mrb2.add_request_id(req_id);
+                    mrb2.add_op(meminfo::memory::OpCode_FREE);
+                    mrb2.add_handle(stripe.remote_handle);
+                    builder.FinishSizePrefixed(mrb2.Finish());
+                    sync_remote_call(stripe.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+                } catch (const std::exception& e) {
+                    throw std::runtime_error("Failed to read stripe: " + std::string(e.what()));
+                }
+            }
+        }
+    } else {
+        if (!alloc.peer || !alloc.peer->connected) throw std::runtime_error("Peer not connected");
+        
+        uint64_t req_id = next_request_id_++;
+        flatbuffers::FlatBufferBuilder builder;
+        meminfo::memory::MemoryRequestBuilder mrb(builder);
+        mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+        mrb.add_request_id(req_id);
+        mrb.add_op(meminfo::memory::OpCode_READ);
+        mrb.add_handle(alloc.remote_handle);
+        mrb.add_offset(offset);
+        mrb.add_size(size);
+        builder.FinishSizePrefixed(mrb.Finish());
+        
+        auto resp_data = sync_remote_call(alloc.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+        if (resp_data.empty()) throw std::runtime_error("Empty response");
+        
+        flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+        if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+            throw std::runtime_error("Invalid MemoryResponse buffer");
+        }
+        const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
+        
+        if (resp->status() != meminfo::memory::StatusCode_OK || !resp->data()) {
+            throw std::runtime_error("Failed to read from remote peer");
+        }
+        
+        std::vector<uint8_t> data(resp->data()->begin(), resp->data()->end());
+        result = std::move(data);
+        
+        // Free from remote after read
+        req_id = next_request_id_++;
+        builder.Clear();
+        meminfo::memory::MemoryRequestBuilder mrb2(builder);
+        mrb2.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
+        mrb2.add_request_id(req_id);
+        mrb2.add_op(meminfo::memory::OpCode_FREE);
+        mrb2.add_handle(alloc.remote_handle);
+        builder.FinishSizePrefixed(mrb2.Finish());
+        sync_remote_call(alloc.peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+    }
+    
+    return result;
+}
+
 void MemoryClient::free(handle_t handle) {
     if (cache_.remove(handle)) {
         return; // was purely local
@@ -239,22 +578,8 @@ void MemoryClient::free(handle_t handle) {
     std::lock_guard<std::mutex> lock(remote_mutex_);
     auto it = remote_handles_.find(handle);
     if (it != remote_handles_.end()) {
-        uint64_t remote_handle = it->second.remote_handle;
-        RemotePeer* peer = handle_to_peer_[handle];
-        
-        uint64_t req_id = next_request_id_++;
-        flatbuffers::FlatBufferBuilder builder;
-        meminfo::memory::MemoryRequestBuilder mrb(builder);
-        mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
-        mrb.add_request_id(req_id);
-        mrb.add_op(meminfo::memory::OpCode_FREE);
-        mrb.add_handle(remote_handle);
-        builder.FinishSizePrefixed(mrb.Finish());
-        
-        sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
-        
+        free_remote(it->second);
         remote_handles_.erase(it);
-        handle_to_peer_.erase(handle);
     }
 }
 
@@ -300,60 +625,20 @@ void MemoryClient::evict_if_needed(size_t size_needed) {
         auto evicted = cache_.evict_one();
         if (!evicted) break; // cache is empty
         
-        if (current_peer_) {
-            uint64_t remote_handle = 0;
-            
-            // Allocate on remote
-            uint64_t req_id = next_request_id_++;
-            flatbuffers::FlatBufferBuilder builder;
-            meminfo::memory::MemoryRequestBuilder mrb(builder);
-            mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
-            mrb.add_request_id(req_id);
-            mrb.add_op(meminfo::memory::OpCode_ALLOC);
-            mrb.add_size(evicted->data.size());
-            builder.FinishSizePrefixed(mrb.Finish());
-            
-            auto resp_data = sync_remote_call(current_peer_, builder.GetBufferPointer(), builder.GetSize(), req_id);
-            if (resp_data.empty()) throw std::runtime_error("Empty response");
-            flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
-            if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
-                throw std::runtime_error("Invalid MemoryResponse buffer");
-            }
-            const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
-            
-            if (resp->status() == meminfo::memory::StatusCode_OK) {
-                remote_handle = resp->handle();
-                
-                // Write data
-                req_id = next_request_id_++;
-                builder.Clear();
-                auto fb_data = builder.CreateVector(evicted->data);
-                meminfo::memory::MemoryRequestBuilder mrb2(builder);
-                mrb2.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
-                mrb2.add_request_id(req_id);
-                mrb2.add_op(meminfo::memory::OpCode_WRITE);
-                mrb2.add_handle(remote_handle);
-                mrb2.add_offset(0);
-                mrb2.add_data(fb_data);
-                mrb2.add_checksum(crc32c(evicted->data.data(), evicted->data.size()));
-                builder.FinishSizePrefixed(mrb2.Finish());
-                
-                sync_remote_call(current_peer_, builder.GetBufferPointer(), builder.GetSize(), req_id);
-                
-                std::lock_guard<std::mutex> lock(remote_mutex_);
-                remote_handles_[evicted->handle] = {remote_handle, evicted->data.size()};
-                handle_to_peer_[evicted->handle] = current_peer_;
-            } else {
-                spdlog::error("Failed to allocate on remote: {}", resp->message() ? resp->message()->str() : "unknown");
-            }
+        allocate_remote(evicted->handle, evicted->data.size());
+        
+        // Write data to remote
+        std::lock_guard<std::mutex> lock(remote_mutex_);
+        auto it = remote_handles_.find(evicted->handle);
+        if (it != remote_handles_.end()) {
+            write_remote(it->second, 0, evicted->data.data(), evicted->data.size());
         }
     }
 }
 
 void MemoryClient::load_to_local(handle_t handle) {
-    uint64_t remote_handle = 0;
+    RemoteAllocation alloc;
     size_t size = 0;
-    RemotePeer* peer = nullptr;
     
     {
         std::lock_guard<std::mutex> lock(remote_mutex_);
@@ -361,56 +646,69 @@ void MemoryClient::load_to_local(handle_t handle) {
         if (it == remote_handles_.end()) {
             throw std::invalid_argument("Invalid handle or block not found");
         }
-        remote_handle = it->second.remote_handle;
+        alloc = it->second;
         size = it->second.size;
-        peer = handle_to_peer_[handle];
     }
     
     evict_if_needed(size);
     
-    uint64_t req_id = next_request_id_++;
-    flatbuffers::FlatBufferBuilder builder;
-    meminfo::memory::MemoryRequestBuilder mrb(builder);
-    mrb.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
-    mrb.add_request_id(req_id);
-    mrb.add_op(meminfo::memory::OpCode_READ);
-    mrb.add_handle(remote_handle);
-    mrb.add_offset(0);
-    mrb.add_size(size);
-    builder.FinishSizePrefixed(mrb.Finish());
-    
-    auto resp_data = sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
-    if (resp_data.empty()) throw std::runtime_error("Empty response");
-    flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
-    if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
-        throw std::runtime_error("Invalid MemoryResponse buffer");
-    }
-    const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
-    
-    if (resp->status() != meminfo::memory::StatusCode_OK || !resp->data()) {
-        throw std::runtime_error("Failed to read from remote peer");
-    }
-    
-    std::vector<uint8_t> data(resp->data()->begin(), resp->data()->end());
-    
-    // Free from remote
-    req_id = next_request_id_++;
-    builder.Clear();
-    meminfo::memory::MemoryRequestBuilder mrb2(builder);
-    mrb2.add_protocol_version(meminfo::MEMINFO_PROTOCOL_VERSION);
-    mrb2.add_request_id(req_id);
-    mrb2.add_op(meminfo::memory::OpCode_FREE);
-    mrb2.add_handle(remote_handle);
-    builder.FinishSizePrefixed(mrb2.Finish());
-    sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+    // Read data from remote
+    std::vector<uint8_t> data = read_remote(alloc, 0, size);
     
     {
         std::lock_guard<std::mutex> lock(remote_mutex_);
         remote_handles_.erase(handle);
-        handle_to_peer_.erase(handle);
     }
     
     cache_.put(handle, std::move(data), false); // Data is loaded, clean state
 }
+
+void MemoryClient::on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+    auto* peer = static_cast<MemoryClient::RemotePeer*>(stream->data);
+    
+    if (nread > 0) {
+        peer->read_buffer.insert(peer->read_buffer.end(), buf->base, buf->base + nread);
+        
+        while (peer->read_buffer.size() >= 4) {
+            uint32_t msg_size = flatbuffers::GetPrefixedSize(peer->read_buffer.data());
+            // Cap msg_size to prevent overflow (Bug #7 fix)
+            if (msg_size > 64 * 1024 * 1024) {
+                uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+                return;
+            }
+            if (peer->read_buffer.size() - 4 >= msg_size) {
+                flatbuffers::Verifier verifier(peer->read_buffer.data(), msg_size + 4);
+                if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                    uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+                    return;
+                }
+                const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(peer->read_buffer.data());
+                
+                std::shared_ptr<RequestContext> req_ctx;
+                {
+                    std::lock_guard<std::mutex> lock(peer->client->requests_mutex_);
+                    auto it = peer->client->pending_requests_.find(resp->request_id());
+                    if (it != peer->client->pending_requests_.end()) {
+                        req_ctx = it->second;
+                        peer->client->pending_requests_.erase(it);
+                    }
+                }
+                
+                if (req_ctx) {
+                    std::vector<uint8_t> result;
+                    // Append full response buffer for decoding by the caller
+                    result.assign(peer->read_buffer.data(), peer->read_buffer.data() + msg_size + 4);
+                    req_ctx->promise.set_value(std::move(result));
+                }
+                
+                peer->read_buffer.erase(peer->read_buffer.begin(), peer->read_buffer.begin() + msg_size + 4);
+            } else {
+                break;
+            }
+        }
+    }
+    if (buf->base) delete[] buf->base;
+}
+
 } // namespace client
 } // namespace meminfo
