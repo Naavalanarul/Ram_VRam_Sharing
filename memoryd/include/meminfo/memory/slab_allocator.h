@@ -4,6 +4,8 @@
 #include <vector>
 #include <stdexcept>
 #include <mutex>
+#include <shared_mutex>
+#include <memory>
 
 namespace meminfo {
 namespace memory {
@@ -37,6 +39,10 @@ private:
     size_t page_size_;
     size_t total_pages_;
     uint8_t* buffer_;
+    
+    enum class PageState { FREE, ALLOCATED };
+    std::unique_ptr<PageState[]> page_states_;
+    mutable std::unique_ptr<std::shared_mutex[]> page_locks_;
     
     mutable std::mutex mutex_;
     std::vector<size_t> free_list_;

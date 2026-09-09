@@ -19,6 +19,13 @@ bool LRUCache::put(handle_t handle, std::vector<uint8_t> data, bool dirty) {
         map_.erase(it);
     }
     
+    while (current_bytes_ + data.size() > max_bytes_ && !list_.empty()) {
+        auto last = std::prev(list_.end());
+        current_bytes_ -= last->data.size();
+        map_.erase(last->handle);
+        list_.pop_back();
+    }
+    
     current_bytes_ += data.size();
     list_.push_front({handle, std::move(data), dirty});
     map_[handle] = list_.begin();

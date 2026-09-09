@@ -70,8 +70,8 @@ TEST(PeerTableTest, TickStaleAndEvict) {
     ASSERT_EQ(peers.size(), 1);
     EXPECT_EQ(peers[0].state, PeerInfo::State::STALE);
     
-    // Sleep for 1 more second to evict (total > 2 seconds)
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // Sleep for 2 more seconds to evict (total > 3 seconds)
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     table.tick();
     
     EXPECT_EQ(table.get_peers().size(), 0);

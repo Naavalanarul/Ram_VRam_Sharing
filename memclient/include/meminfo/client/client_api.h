@@ -53,6 +53,7 @@ private:
 
     // --- Thread-safe internal methods ---
     void connect_to_peers();
+    void add_peer_and_connect(const std::string& ip, int port);
     std::vector<uint8_t> sync_remote_call(RemotePeer* peer, const uint8_t* payload, size_t size, uint64_t request_id);
     void evict_if_needed(size_t size_needed);
     void load_to_local(handle_t handle);

@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <chrono>
+#include <mutex>
 
 namespace meminfo {
 namespace discovery {
@@ -36,6 +37,7 @@ public:
     void set_ttl_seconds(int ttl) { ttl_seconds_ = ttl; }
 
 private:
+    mutable std::mutex mutex_;
     std::unordered_map<node_id_t, PeerInfo> peers_;
     int ttl_seconds_ = 10;
 };

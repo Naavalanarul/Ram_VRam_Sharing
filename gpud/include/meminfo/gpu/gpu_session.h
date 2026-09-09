@@ -23,7 +23,6 @@ private:
 
     void process_buffer();
     void handle_request(const uint8_t* data, size_t size);
-    void send_response(uint64_t request_id, int error_code, uint64_t device_ptr = 0, const uint8_t* data = nullptr, size_t data_size = 0, const std::string& message = "");
 
     uv_tcp_t socket_;
     ICudaExecutor* executor_;

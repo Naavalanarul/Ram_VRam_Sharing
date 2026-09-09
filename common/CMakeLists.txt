@@ -39,6 +39,7 @@ target_link_libraries(meminfo_common
         spdlog::spdlog
         tomlplusplus::tomlplusplus
         flatbuffers
+        meminfo_platform
 )
 
 meminfo_set_strict_warnings(meminfo_common)

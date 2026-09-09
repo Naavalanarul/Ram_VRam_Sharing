@@ -68,41 +68,45 @@ MemoryClient::MemoryClient(size_t max_local_bytes, const std::string& discovery_
     wakeup_async_.data = this;
     
     if (!test_ip.empty() && test_port > 0) {
-        auto peer = std::make_unique<RemotePeer>();
-        peer->client = this;
-        peer->ip = test_ip;
-        peer->port = test_port;
-        
-        peer->socket = new uv_tcp_t;
-        uv_tcp_init(&loop_, peer->socket);
-        peer->socket->data = peer.get();
-        
-        struct sockaddr_in dest;
-        uv_ip4_addr(peer->ip.c_str(), peer->port, &dest);
-        
-        uv_connect_t* conn = new uv_connect_t;
-        conn->data = peer.get();
-        uv_tcp_connect(conn, peer->socket, reinterpret_cast<const struct sockaddr*>(&dest), [](uv_connect_t* req, int status) {
-            auto* p = static_cast<RemotePeer*>(req->data);
-            if (status == 0) {
-                p->connected = true;
-                uv_read_start(reinterpret_cast<uv_stream_t*>(p->socket), 
-                    [](uv_handle_t*, size_t suggested, uv_buf_t* b) {
-                        b->base = new char[suggested];
-                        b->len = suggested;
-                    },
-                    MemoryClient::on_peer_read);
-            }
-            delete req;
-        });
-        
-        if (!current_peer_) current_peer_ = peer.get();
-        peers_.push_back(std::move(peer));
+        add_peer_and_connect(test_ip, test_port);
     } else {
         connect_to_peers();
     }
     
     network_thread_ = std::thread(&MemoryClient::network_thread_main, this);
+}
+
+void MemoryClient::add_peer_and_connect(const std::string& ip, int port) {
+    auto peer = std::make_unique<RemotePeer>();
+    peer->client = this;
+    peer->ip = ip;
+    peer->port = port;
+    
+    peer->socket = new uv_tcp_t;
+    uv_tcp_init(&loop_, peer->socket);
+    peer->socket->data = peer.get();
+    
+    struct sockaddr_in dest;
+    uv_ip4_addr(peer->ip.c_str(), peer->port, &dest);
+    
+    uv_connect_t* conn = new uv_connect_t;
+    conn->data = peer.get();
+    uv_tcp_connect(conn, peer->socket, reinterpret_cast<const struct sockaddr*>(&dest), [](uv_connect_t* req, int status) {
+        auto* p = static_cast<RemotePeer*>(req->data);
+        if (status == 0) {
+            p->connected = true;
+            uv_read_start(reinterpret_cast<uv_stream_t*>(p->socket), 
+                [](uv_handle_t*, size_t suggested, uv_buf_t* b) {
+                    b->base = new char[suggested];
+                    b->len = suggested;
+                },
+                MemoryClient::on_peer_read);
+        }
+        delete req;
+    });
+    
+    if (!current_peer_) current_peer_ = peer.get();
+    peers_.push_back(std::move(peer));
 }
 
 MemoryClient::~MemoryClient() {
@@ -134,9 +138,8 @@ void MemoryClient::connect_to_peers() {
             const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::control::ControlResponse>(resp_buf.data());
             if (resp && resp->peers()) {
                 for (const auto* p : *resp->peers()) {
-                    if (p->memory_port() > 0) {
-                        // In a real app we'd setup uv_tcp here or via queue.
-                        // Left out for brevity in MVP.
+                    if (p->memory_port() > 0 && p->address()) {
+                        add_peer_and_connect(p->address()->str(), p->memory_port());
                     }
                 }
             }
@@ -154,7 +157,17 @@ void MemoryClient::on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf
         
         while (peer->read_buffer.size() >= 4) {
             uint32_t msg_size = flatbuffers::GetPrefixedSize(peer->read_buffer.data());
-            if (peer->read_buffer.size() >= msg_size + 4) {
+            // Cap msg_size to prevent overflow (Bug #7 fix)
+            if (msg_size > 64 * 1024 * 1024) {
+                uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+                return;
+            }
+            if (peer->read_buffer.size() - 4 >= msg_size) {
+                flatbuffers::Verifier verifier(peer->read_buffer.data(), msg_size + 4);
+                if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                    uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+                    return;
+                }
                 const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(peer->read_buffer.data());
                 
                 std::shared_ptr<RequestContext> req_ctx;
@@ -202,6 +215,10 @@ std::vector<uint8_t> MemoryClient::sync_remote_call(RemotePeer* peer, const uint
         outbound_queue_.push(std::move(msg));
     }
     uv_async_send(&wakeup_async_);
+    
+    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        throw std::runtime_error("Remote call timed out");
+    }
     
     return future.get();
 }
@@ -297,6 +314,11 @@ void MemoryClient::evict_if_needed(size_t size_needed) {
             builder.FinishSizePrefixed(mrb.Finish());
             
             auto resp_data = sync_remote_call(current_peer_, builder.GetBufferPointer(), builder.GetSize(), req_id);
+            if (resp_data.empty()) throw std::runtime_error("Empty response");
+            flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+            if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+                throw std::runtime_error("Invalid MemoryResponse buffer");
+            }
             const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
             
             if (resp->status() == meminfo::memory::StatusCode_OK) {
@@ -358,6 +380,11 @@ void MemoryClient::load_to_local(handle_t handle) {
     builder.FinishSizePrefixed(mrb.Finish());
     
     auto resp_data = sync_remote_call(peer, builder.GetBufferPointer(), builder.GetSize(), req_id);
+    if (resp_data.empty()) throw std::runtime_error("Empty response");
+    flatbuffers::Verifier verifier(resp_data.data(), resp_data.size());
+    if (!verifier.VerifySizePrefixedBuffer<meminfo::memory::MemoryResponse>(nullptr)) {
+        throw std::runtime_error("Invalid MemoryResponse buffer");
+    }
     const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::memory::MemoryResponse>(resp_data.data());
     
     if (resp->status() != meminfo::memory::StatusCode_OK || !resp->data()) {

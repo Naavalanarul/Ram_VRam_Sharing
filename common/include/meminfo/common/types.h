@@ -9,6 +9,8 @@
 
 namespace meminfo {
 
+constexpr uint32_t MAX_MESSAGE_SIZE = 64 * 1024 * 1024; // 64MB
+
 using node_id_t = std::array<uint8_t, 16>;
 using handle_t = uint64_t;
 using request_id_t = uint64_t;

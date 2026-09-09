@@ -58,3 +58,17 @@ TEST(LRUCacheTest, PutTooLarge) {
     EXPECT_FALSE(cache.put(1, std::vector<uint8_t>(11, 'a')));
     EXPECT_EQ(cache.count(), 0);
 }
+
+TEST(LRUCacheTest, PutBeyondCapacitySelfEvict) {
+    LRUCache cache(10); // 10 bytes max
+    
+    EXPECT_TRUE(cache.put(1, std::vector<uint8_t>(4, 'a'))); // 4 bytes
+    EXPECT_TRUE(cache.put(2, std::vector<uint8_t>(4, 'b'))); // 8 bytes
+    EXPECT_TRUE(cache.put(3, std::vector<uint8_t>(4, 'c'))); // 12 bytes -> exceeds, so 1 must be evicted!
+    
+    EXPECT_EQ(cache.count(), 2);
+    EXPECT_EQ(cache.current_size(), 8);
+    EXPECT_FALSE(cache.get(1).has_value()); // 1 was evicted
+    EXPECT_TRUE(cache.get(2).has_value());
+    EXPECT_TRUE(cache.get(3).has_value());
+}

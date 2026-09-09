@@ -1,3 +1,5 @@
+#include <meminfo/common/types.h>
+
 #include <meminfo/memory/client_session.h>
 #include <meminfo/common/crc32c.h>
 #include <meminfo/common/protocol_version.h>
@@ -51,7 +53,12 @@ void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* 
 void ClientSession::process_buffer() {
     while (read_buffer_.size() >= 4) {
         uint32_t size = flatbuffers::GetPrefixedSize(read_buffer_.data());
-        if (read_buffer_.size() >= size + 4) {
+        if (size > MAX_MESSAGE_SIZE) {
+            spdlog::error("ClientSession received oversized message");
+            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+            return;
+        }
+        if (read_buffer_.size() - 4 >= size) {
             handle_request(read_buffer_.data(), size + 4);
             read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + size + 4);
         } else {

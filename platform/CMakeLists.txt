@@ -7,18 +7,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/linux/memory_monitor_linux.cpp
         src/linux/page_fault_linux.cpp
         src/linux/local_ipc_linux.cpp
+        src/linux/random_linux.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     list(APPEND PLATFORM_SRCS
         src/windows/memory_monitor_win.cpp
         src/windows/page_fault_win.cpp
         src/windows/local_ipc_win.cpp
+        src/windows/random_win.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND PLATFORM_SRCS
         src/macos/memory_monitor_mac.cpp
         src/macos/page_fault_mac.cpp
         src/macos/local_ipc_mac.cpp
+        src/macos/random_mac.cpp
     )
 else()
     message(FATAL_ERROR "Unsupported platform for libplatform: ${CMAKE_SYSTEM_NAME}")
@@ -32,6 +35,8 @@ target_link_libraries(meminfo_platform PUBLIC spdlog::spdlog)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(meminfo_platform PRIVATE pthread)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(meminfo_platform PRIVATE bcrypt)
 endif()
 
 meminfo_set_strict_warnings(meminfo_platform)
