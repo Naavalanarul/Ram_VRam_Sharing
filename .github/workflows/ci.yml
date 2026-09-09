@@ -1,0 +1,29 @@
+name: MemInfo CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DMEMINFO_BUILD_TESTS=ON
+
+    - name: Build
+      run: cmake --build build --config Debug -j 4
+
+    - name: Test
+      working-directory: build
+      run: ctest --output-on-failure -C Debug

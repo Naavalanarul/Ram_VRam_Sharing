@@ -1,0 +1,32 @@
+# Build directories
+build/
+build-*/
+out/
+bin/
+
+# CMake / IDE
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.vscode/
+.idea/
+
+# Logs and runtime artifacts
+logs/
+*.log
+*.sqlite
+*.db
+/tmp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

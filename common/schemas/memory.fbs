@@ -1,0 +1,41 @@
+namespace meminfo.memory;
+
+enum OpCode : uint8 {
+  ALLOC = 0,
+  WRITE = 1,
+  READ = 2,
+  FREE = 3,
+  PING = 4
+}
+
+enum StatusCode : uint8 {
+  OK = 0,
+  ERROR_GENERIC = 1,
+  BUSY = 2,
+  CHECKSUM_MISMATCH = 3,
+  INVALID_HANDLE = 4,
+  OUT_OF_MEMORY = 5,
+  VERSION_MISMATCH = 6
+}
+
+table MemoryRequest {
+  protocol_version: uint16;
+  request_id: uint64;
+  op: OpCode;
+  handle: uint64;           // for WRITE/READ/FREE
+  size: uint64;             // for ALLOC (bytes requested)
+  offset: uint64;           // for WRITE/READ
+  data: [ubyte];            // for WRITE payload
+  checksum: uint32;         // CRC32C of data for WRITE
+}
+
+table MemoryResponse {
+  request_id: uint64;
+  status: StatusCode;
+  handle: uint64;           // for ALLOC response
+  data: [ubyte];            // for READ response
+  checksum: uint32;         // CRC32C of data for READ
+  message: string;          // human-readable error message
+}
+
+root_type MemoryRequest;

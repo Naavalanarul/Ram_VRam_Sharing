@@ -1,0 +1,46 @@
+namespace meminfo.control;
+
+enum ControlCommand : uint8 {
+  LIST_PEERS = 0,
+  GET_LOCAL_STATUS = 1,
+  JOIN_POOL = 2,
+  LEAVE_POOL = 3
+}
+
+enum PeerState : uint8 {
+  ACTIVE = 0,
+  STALE = 1
+}
+
+table PeerInfo {
+  node_id: [ubyte];          // 16 bytes UUID
+  hostname: string;
+  address: string;
+  free_ram_bytes: uint64;
+  free_vram_bytes: uint64;
+  memory_port: uint16;
+  gpu_port: uint16;
+  state: PeerState;
+  last_seen_ms: uint64;      // unix epoch ms
+}
+
+table ControlRequest {
+  command: ControlCommand;
+  request_id: uint64;
+}
+
+table ControlResponse {
+  request_id: uint64;
+  success: bool;
+  message: string;
+  peers: [PeerInfo];          // for LIST_PEERS response
+  // Local status fields
+  local_node_id: [ubyte];
+  local_hostname: string;
+  local_free_ram: uint64;
+  local_free_vram: uint64;
+  pool_joined: bool;
+  peer_count: uint32;
+}
+
+root_type ControlRequest;

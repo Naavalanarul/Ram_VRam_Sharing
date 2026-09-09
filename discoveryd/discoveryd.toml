@@ -1,0 +1,22 @@
+[discovery]
+# The interface to listen on for control connections
+listen_address = "0.0.0.0"
+
+# The port where memoryd is listening for client requests
+memory_port = 9200
+
+# The port where gpud is listening for client requests (0 to disable)
+gpu_port = 9300
+
+# Unix domain socket path for local control API (e.g., list peers)
+control_socket = "/var/run/meminfo_discovery.sock"
+
+# UDP Multicast group and port for LAN discovery
+multicast_group = "239.255.73.77"
+multicast_port = 9100
+
+# How often to broadcast the presence announcement
+announce_interval_ms = 1000
+
+# Time before a peer is considered stale and eventually evicted
+peer_ttl_seconds = 10

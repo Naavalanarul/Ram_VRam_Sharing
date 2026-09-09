@@ -1,0 +1,49 @@
+namespace meminfo.gpu;
+
+enum GpuOpCode : uint8 {
+  CUDA_MALLOC = 0,
+  CUDA_FREE = 1,
+  CUDA_MEMCPY = 2,
+  CUDA_LAUNCH_KERNEL = 3,
+  CUDA_GET_DEVICE_PROPERTIES = 4,
+  CUDA_DEVICE_SYNCHRONIZE = 5
+}
+
+enum MemcpyKind : uint8 {
+  HOST_TO_DEVICE = 0,
+  DEVICE_TO_HOST = 1,
+  DEVICE_TO_DEVICE = 2,
+  HOST_TO_HOST = 3
+}
+
+table GpuRequest {
+  protocol_version: uint16;
+  request_id: uint64;
+  op: GpuOpCode;
+  device_ptr: uint64;
+  size: uint64;
+  data: [ubyte];
+  memcpy_kind: MemcpyKind;
+  grid_dim_x: uint32;
+  grid_dim_y: uint32;
+  grid_dim_z: uint32;
+  block_dim_x: uint32;
+  block_dim_y: uint32;
+  block_dim_z: uint32;
+  shared_mem: uint64;
+  kernel_name: string;
+  kernel_args: [ubyte];
+  device_id: int32;
+  dst_ptr: uint64;
+  src_ptr: uint64;
+}
+
+table GpuResponse {
+  request_id: uint64;
+  error_code: int32;
+  device_ptr: uint64;
+  data: [ubyte];
+  message: string;
+}
+
+root_type GpuRequest;

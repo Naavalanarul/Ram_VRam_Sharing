@@ -1,0 +1,14 @@
+[memory]
+# IP address for the memory serving TCP server to bind to
+listen_address = "0.0.0.0"
+
+# Port for the memory serving TCP server
+port = 9200
+
+# Total amount of RAM to pre-reserve for this tier
+# Default: 256MB
+total_reserved_bytes = 268435456
+
+# Size of a single memory slab/page
+# Default: 4KB
+page_size_bytes = 4096
