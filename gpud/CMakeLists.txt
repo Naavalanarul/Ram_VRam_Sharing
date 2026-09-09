@@ -18,6 +18,7 @@ endif()
 add_library(gpud_lib STATIC
     src/gpu_session.cpp
     src/gpu_daemon.cpp
+    src/gpu_protocol.cpp
     ${CUDA_EXECUTOR_SRC}
 )
 

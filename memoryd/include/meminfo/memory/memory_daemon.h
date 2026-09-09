@@ -17,6 +17,7 @@ public:
     
     void run();
     void stop();
+    int get_listen_port() const { return listen_port_; }
 
 private:
     static void on_connection(uv_stream_t* server, int status);
@@ -31,6 +32,7 @@ private:
     uv_tcp_t server_socket_;
     uint64_t next_session_id_ = 1;
     bool is_running_ = false;
+    int listen_port_ = 0;
     
     std::unique_ptr<SignalHandler> sig_handler_;
 };

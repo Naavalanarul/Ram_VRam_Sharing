@@ -67,13 +67,23 @@ void MemoryDaemon::run() {
         throw std::runtime_error(std::string("Bind error: ") + uv_strerror(r));
     }
     
+    // Get the actual port if port 0 was specified
+    if (port == 0) {
+        struct sockaddr_in actual_addr;
+        int namelen = sizeof(actual_addr);
+        uv_tcp_getsockname(&server_socket_, reinterpret_cast<struct sockaddr*>(&actual_addr), &namelen);
+        listen_port_ = ntohs(actual_addr.sin_port);
+    } else {
+        listen_port_ = port;
+    }
+    
     r = uv_listen(reinterpret_cast<uv_stream_t*>(&server_socket_), 128, on_connection);
     if (r < 0) {
         spdlog::error("Listen error: {}", uv_strerror(r));
         throw std::runtime_error(std::string("Listen error: ") + uv_strerror(r));
     }
     
-    spdlog::info("memoryd listening on {}:{}", listen_addr, port);
+    spdlog::info("memoryd listening on {}:{}", listen_addr, listen_port_);
     is_running_ = true;
     
     uv_run(&loop_, UV_RUN_DEFAULT);

@@ -12,17 +12,18 @@ using namespace meminfo;
 using namespace meminfo::memory;
 
 TEST(ConcurrentClientsTest, MultipleClientsAllocWriteRead) {
-    auto write_config = [](const std::string& path) {
+    auto write_config = [](const std::string& path, int port) {
         std::ofstream out(path);
         out << "[memory]\n";
         out << "listen_address = \"127.0.0.1\"\n";
-        out << "port = 9250\n";
+        out << "port = " << port << "\n";
         out << "total_reserved_bytes = 1048576\n"; // 1MB
         out << "page_size_bytes = 4096\n";
     };
     
     std::string cfg_path = "/tmp/meminfo_test_memoryd.toml";
-    write_config(cfg_path);
+    int test_port = 0; // Let OS assign
+    write_config(cfg_path, test_port);
     Config config(cfg_path);
     
     std::unique_ptr<MemoryDaemon> daemon = std::make_unique<MemoryDaemon>(config);
@@ -30,6 +31,9 @@ TEST(ConcurrentClientsTest, MultipleClientsAllocWriteRead) {
     
     // Give it a moment to bind
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    // Get the actual port the daemon bound to
+    int actual_port = daemon->get_listen_port();
     
     auto run_client = [&](int client_id) {
         uv_loop_t loop;
@@ -39,7 +43,7 @@ TEST(ConcurrentClientsTest, MultipleClientsAllocWriteRead) {
         uv_tcp_init(&loop, &client);
         
         struct sockaddr_in dest;
-        uv_ip4_addr("127.0.0.1", 9250, &dest);
+        uv_ip4_addr("127.0.0.1", actual_port, &dest);
         
         uv_connect_t connect_req;
         bool connected = false;
