@@ -21,8 +21,12 @@ jobs:
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DMEMINFO_BUILD_TESTS=ON
 
+    # --verbose surfaces each build tool invocation. Without it the Windows
+    # (MSBuild) job fails at the FlatBuffers custom rule with no diagnostic at
+    # all -- no MSB error, no compiler output -- which makes the failure
+    # impossible to diagnose from the log.
     - name: Build
-      run: cmake --build build --config Debug -j 4
+      run: cmake --build build --config Debug -j 4 --verbose
 
     - name: Test
       working-directory: build
