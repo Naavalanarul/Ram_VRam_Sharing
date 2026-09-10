@@ -57,12 +57,21 @@ MemoryClient::MemoryClient(size_t max_local_bytes, const std::string& discovery_
                 
                 auto* wr = new WriteReq;
                 wr->buf_data = std::move(msg.payload);
-                uv_buf_t buf = uv_buf_init(reinterpret_cast<char*>(wr->buf_data.data()), wr->buf_data.size());
-                
-                uv_write(&wr->req, reinterpret_cast<uv_stream_t*>(msg.peer->socket), &buf, 1, [](uv_write_t* req, int) {
+                uv_buf_t buf = uv_buf_init(reinterpret_cast<char*>(wr->buf_data.data()),
+                                           static_cast<unsigned int>(wr->buf_data.size()));
+
+                // Must be set before uv_write: the write can complete inline,
+                // running the callback before uv_write returns.
+                wr->req.data = wr;
+
+                int wr_rc = uv_write(&wr->req, reinterpret_cast<uv_stream_t*>(msg.peer->socket),
+                                     &buf, 1, [](uv_write_t* req, int) {
                     delete static_cast<WriteReq*>(req->data);
                 });
-                wr->req.data = wr;
+                if (wr_rc != 0) {
+                    // The callback never runs when uv_write fails outright.
+                    delete wr;
+                }
             }
         }
     });
@@ -115,7 +124,16 @@ MemoryClient::~MemoryClient() {
     if (network_thread_.joinable()) {
         network_thread_.join();
     }
-    uv_loop_close(&loop_);
+
+    // The stop callback calls uv_stop() straight after uv_close(), so uv_run
+    // returns before the close callbacks have executed. Drain them here,
+    // otherwise uv_loop_close() fails with EBUSY and the handles leak.
+    uv_run(&loop_, UV_RUN_DEFAULT);
+
+    int rc = uv_loop_close(&loop_);
+    if (rc != 0) {
+        spdlog::warn("MemoryClient loop did not close cleanly: {}", uv_strerror(rc));
+    }
 }
 
 void MemoryClient::network_thread_main() {
@@ -175,6 +193,7 @@ void MemoryClient::refresh_peer_capacity() {
                             if (peer->ip == addr && peer->port == port) {
                                 peer->free_ram_bytes = p->free_ram_bytes();
                                 peer->free_vram_bytes = p->free_vram_bytes();
+                                peer->capacity_known = true;
                                 peer->last_capacity_update = now;
                                 break;
                             }
@@ -193,7 +212,8 @@ MemoryClient::RemotePeer* MemoryClient::select_best_peer(size_t size_needed) {
     auto now = std::chrono::steady_clock::now();
     bool need_refresh = true;
     for (const auto& peer : peers_) {
-        if (peer->connected && now - peer->last_capacity_update < PEER_CAPACITY_TTL) {
+        if (peer->connected && peer->capacity_known &&
+            now - peer->last_capacity_update < PEER_CAPACITY_TTL) {
             need_refresh = false;
             break;
         }
@@ -202,20 +222,25 @@ MemoryClient::RemotePeer* MemoryClient::select_best_peer(size_t size_needed) {
         refresh_peer_capacity();
     }
     
-    // Find connected peer with most free RAM that can fit the allocation
+    // Find the connected peer with the most free RAM that can fit the
+    // allocation. A peer whose capacity discovery has not reported is a
+    // candidate of last resort rather than an exclusion.
     MemoryClient::RemotePeer* best_peer = nullptr;
     uint64_t best_free = 0;
-    
+    MemoryClient::RemotePeer* unknown_peer = nullptr;
+
     for (auto& peer : peers_) {
-        if (peer->connected && peer->free_ram_bytes >= size_needed) {
-            if (peer->free_ram_bytes > best_free) {
-                best_free = peer->free_ram_bytes;
-                best_peer = peer.get();
-            }
+        if (!peer->connected) continue;
+
+        if (!peer->capacity_known) {
+            if (!unknown_peer) unknown_peer = peer.get();
+        } else if (peer->free_ram_bytes >= size_needed && peer->free_ram_bytes > best_free) {
+            best_free = peer->free_ram_bytes;
+            best_peer = peer.get();
         }
     }
-    
-    return best_peer;
+
+    return best_peer ? best_peer : unknown_peer;
 }
 
 std::vector<uint8_t> MemoryClient::sync_remote_call(MemoryClient::RemotePeer* peer, const uint8_t* payload, size_t size, uint64_t request_id) {
@@ -264,7 +289,10 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
         }
     }
     
+    // Most free RAM first; peers whose capacity discovery has not reported sort
+    // last but are still tried, since "unknown" is not the same as "full".
     std::sort(candidates.begin(), candidates.end(), [](MemoryClient::RemotePeer* a, MemoryClient::RemotePeer* b) {
+        if (a->capacity_known != b->capacity_known) return a->capacity_known;
         return a->free_ram_bytes > b->free_ram_bytes;
     });
     
@@ -276,7 +304,7 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
     
     // First try: single peer allocation
     for (MemoryClient::RemotePeer* peer : candidates) {
-        if (peer->free_ram_bytes >= size) {
+        if (peer->may_fit(size)) {
             uint64_t req_id = next_request_id_++;
             flatbuffers::FlatBufferBuilder builder;
             meminfo::memory::MemoryRequestBuilder mrb(builder);
@@ -318,7 +346,11 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
         for (MemoryClient::RemotePeer* peer : candidates) {
             if (remaining == 0) break;
             
-            size_t chunk_size = std::min<size_t>(remaining, static_cast<size_t>(peer->free_ram_bytes));
+            // An unknown-capacity peer is offered the whole remainder; the
+            // daemon rejects what it cannot hold.
+            size_t chunk_size = peer->capacity_known
+                ? std::min<size_t>(remaining, static_cast<size_t>(peer->free_ram_bytes))
+                : remaining;
             if (chunk_size == 0) continue;
             
             uint64_t req_id = next_request_id_++;
@@ -358,6 +390,16 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
             alloc.is_striped = true;
             allocated = true;
             spdlog::info("Successfully striped {} bytes across {} peers", size, alloc.stripes.size());
+        } else if (!alloc.stripes.empty()) {
+            // Partial striping: release what was already reserved instead of
+            // stranding it on the remote peers.
+            spdlog::warn("Striping incomplete ({} bytes unplaced); releasing {} partial stripe(s)",
+                         remaining, alloc.stripes.size());
+            RemoteAllocation partial;
+            partial.is_striped = true;
+            partial.stripes = std::move(alloc.stripes);
+            free_remote(partial);
+            alloc.stripes.clear();
         }
     }
     
@@ -586,7 +628,7 @@ void MemoryClient::free(handle_t handle) {
 std::vector<uint8_t> MemoryClient::read(handle_t handle, size_t offset, size_t size) {
     auto local_opt = cache_.get(handle);
     if (local_opt) {
-        if (offset + size > local_opt->size()) throw std::out_of_range("Read out of bounds");
+        if (offset > local_opt->size() || size > local_opt->size() - offset) throw std::out_of_range("Read out of bounds");
         return std::vector<uint8_t>(local_opt->begin() + offset, local_opt->begin() + offset + size);
     }
     
@@ -594,14 +636,14 @@ std::vector<uint8_t> MemoryClient::read(handle_t handle, size_t offset, size_t s
     
     local_opt = cache_.get(handle);
     if (!local_opt) throw std::runtime_error("Failed to load block from remote");
-    if (offset + size > local_opt->size()) throw std::out_of_range("Read out of bounds");
+    if (offset > local_opt->size() || size > local_opt->size() - offset) throw std::out_of_range("Read out of bounds");
     return std::vector<uint8_t>(local_opt->begin() + offset, local_opt->begin() + offset + size);
 }
 
 void MemoryClient::write(handle_t handle, size_t offset, const std::vector<uint8_t>& data) {
     auto local_opt = cache_.get(handle);
     if (local_opt) {
-        if (offset + data.size() > local_opt->size()) throw std::out_of_range("Write out of bounds");
+        if (offset > local_opt->size() || data.size() > local_opt->size() - offset) throw std::out_of_range("Write out of bounds");
         std::copy(data.begin(), data.end(), local_opt->begin() + offset);
         cache_.put(handle, std::move(*local_opt), true);
         return;
@@ -611,7 +653,7 @@ void MemoryClient::write(handle_t handle, size_t offset, const std::vector<uint8
     
     local_opt = cache_.get(handle);
     if (!local_opt) throw std::runtime_error("Failed to load block from remote");
-    if (offset + data.size() > local_opt->size()) throw std::out_of_range("Write out of bounds");
+    if (offset > local_opt->size() || data.size() > local_opt->size() - offset) throw std::out_of_range("Write out of bounds");
     std::copy(data.begin(), data.end(), local_opt->begin() + offset);
     cache_.put(handle, std::move(*local_opt), true);
 }
@@ -624,15 +666,52 @@ void MemoryClient::evict_if_needed(size_t size_needed) {
     while (cache_.needs_eviction(size_needed) || pressure_evict) {
         auto evicted = cache_.evict_one();
         if (!evicted) break; // cache is empty
-        
-        allocate_remote(evicted->handle, evicted->data.size());
-        
-        // Write data to remote
-        std::lock_guard<std::mutex> lock(remote_mutex_);
-        auto it = remote_handles_.find(evicted->handle);
-        if (it != remote_handles_.end()) {
-            write_remote(it->second, 0, evicted->data.data(), evicted->data.size());
+
+        // evict_one() has already removed the block from the cache, so if the
+        // push to a peer fails the only copy of the data is the one in hand.
+        // Restore it before propagating the error.
+        try {
+            allocate_remote(evicted->handle, evicted->data.size());
+
+            RemoteAllocation alloc_copy;
+            {
+                std::lock_guard<std::mutex> lock(remote_mutex_);
+                auto it = remote_handles_.find(evicted->handle);
+                if (it == remote_handles_.end()) {
+                    throw std::runtime_error("Remote allocation vanished after allocate");
+                }
+                alloc_copy = it->second;
+            }
+
+            // Not under remote_mutex_: write_remote blocks on the network and
+            // would stall every other handle operation.
+            write_remote(alloc_copy, 0, evicted->data.data(), evicted->data.size());
+        } catch (...) {
+            // Roll back: drop any remote reservation made for this handle, then
+            // return the block to the cache so the data is not lost.
+            RemoteAllocation orphan;
+            bool has_orphan = false;
+            {
+                std::lock_guard<std::mutex> lock(remote_mutex_);
+                auto it = remote_handles_.find(evicted->handle);
+                if (it != remote_handles_.end()) {
+                    orphan = std::move(it->second);
+                    remote_handles_.erase(it);
+                    has_orphan = true;
+                }
+            }
+            if (has_orphan) {
+                try {
+                    free_remote(orphan);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Failed to release remote allocation during rollback: {}", e.what());
+                }
+            }
+
+            cache_.put(evicted->handle, std::move(evicted->data), evicted->dirty);
+            throw;
         }
+
     }
 }
 
@@ -706,8 +785,36 @@ void MemoryClient::on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf
                 break;
             }
         }
+    } else if (nread < 0) {
+        // EOF or error: the peer will not answer anything still in flight.
+        if (nread != UV_EOF) {
+            spdlog::warn("Peer {}:{} read error: {}", peer->ip, peer->port, uv_strerror(static_cast<int>(nread)));
+        }
+        peer->connected = false;
+        fail_pending_requests(peer->client);
+
+        if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(stream))) {
+            uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+        }
     }
     if (buf->base) delete[] buf->base;
+}
+
+void MemoryClient::fail_pending_requests(MemoryClient* client) {
+    if (!client) return;
+
+    std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> pending;
+    {
+        std::lock_guard<std::mutex> lock(client->requests_mutex_);
+        pending.swap(client->pending_requests_);
+    }
+
+    // An empty buffer is the caller-visible signal for "no usable response".
+    for (auto& entry : pending) {
+        if (entry.second) {
+            entry.second->promise.set_value(std::vector<uint8_t>());
+        }
+    }
 }
 
 } // namespace client

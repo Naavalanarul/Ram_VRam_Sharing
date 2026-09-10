@@ -11,25 +11,32 @@ using namespace meminfo::client;
 using namespace meminfo::memory;
 
 TEST(MemoryClientTest, EvictionAndReadback) {
-    // 1. Create a MemoryDaemon on a random port
-    std::string config_path = "/tmp/meminfo_test_memoryd.toml";
+    // 1. Create a MemoryDaemon on an OS-assigned port. A fixed port collides
+    //    with the cluster integration script (which also binds 9255) and with
+    //    any daemon a previous test left behind.
+    std::string config_path = "/tmp/meminfo_test_client_api.toml";
     std::ofstream out(config_path);
     out << "[memory]\n"
         << "listen_address = \"127.0.0.1\"\n"
-        << "port = 9255\n"
+        << "port = 0\n"
         << "total_reserved_bytes = 1048576\n"
         << "page_size_bytes = 4096\n";
     out.close();
-    
+
     Config config(config_path);
     auto daemon = std::make_unique<MemoryDaemon>(config);
     std::thread daemon_thread([&]() { daemon->run(); });
-    
-    // Give it a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    
+
+    // Wait for the daemon to bind so get_listen_port() reports the real port.
+    int port = 0;
+    for (int i = 0; i < 200 && port == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        port = daemon->get_listen_port();
+    }
+    ASSERT_NE(port, 0) << "memoryd did not bind a port";
+
     // 2. Initialize the client with a tiny local cache (only 20 bytes)
-    MemoryClient client(20, "", "127.0.0.1", 9255);
+    MemoryClient client(20, "", "127.0.0.1", port);
     
     // Give client a moment to connect
     std::this_thread::sleep_for(std::chrono::milliseconds(50));

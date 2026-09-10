@@ -7,10 +7,25 @@ echo "======================================"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="$ROOT_DIR/build/debug"
+# The build directory is supplied by the caller (the integration test passes the
+# directory CMake actually configured); fall back to the documented default.
+BUILD_DIR="${MEMINFO_BUILD_DIR:-$ROOT_DIR/build/debug}"
 SOCKET_PATH="/tmp/meminfo_test_discovery.sock"
 
 cd "$ROOT_DIR"
+
+DISC_PID=""
+MEM_PID=""
+GPU_PID=""
+
+# `set -e` aborts on the first failure, so tear the daemons down from a trap
+# rather than from a final line that may never be reached.
+cleanup() {
+    kill $DISC_PID $MEM_PID $GPU_PID 2>/dev/null || true
+    rm -f /tmp/meminfo_test_*.toml
+    rm -f "$SOCKET_PATH"
+}
+trap cleanup EXIT
 
 # Ensure build exists
 if [ ! -d "$BUILD_DIR" ]; then
@@ -65,9 +80,5 @@ echo "[4/4] Running memclient CLI..."
 echo "======================================"
 echo " Cluster Test Complete! Cleaning up..."
 echo "======================================"
-
-kill $DISC_PID $MEM_PID $GPU_PID 2>/dev/null || true
-rm -f /tmp/meminfo_test_*.toml
-rm -f $SOCKET_PATH
 
 echo "Success!"

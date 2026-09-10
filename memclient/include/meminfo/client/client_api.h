@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -46,10 +47,21 @@ private:
         bool connected = false;
         std::vector<uint8_t> read_buffer;
         
-        // Peer capacity info (cached from discovery)
+        // Peer capacity info (cached from discovery). capacity_known stays
+        // false until discovery actually reports figures for this peer; a peer
+        // reached directly (or before the first successful refresh) must not be
+        // mistaken for one that reported zero free RAM.
         uint64_t free_ram_bytes = 0;
         uint64_t free_vram_bytes = 0;
+        bool capacity_known = false;
         std::chrono::steady_clock::time_point last_capacity_update;
+
+        // True when this peer could hold an allocation of size bytes, treating
+        // unknown capacity as "worth trying" — the daemon answers OUT_OF_MEMORY
+        // if it cannot actually take it.
+        bool may_fit(size_t size) const {
+            return !capacity_known || free_ram_bytes >= size;
+        }
     };
 
     struct RemoteAllocation {
@@ -90,6 +102,8 @@ private:
     // --- libuv thread methods ---
     void network_thread_main();
     static void on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
+    // Resolves every in-flight request with an empty buffer after a peer drops.
+    static void fail_pending_requests(MemoryClient* client);
 
     struct OutboundMessage {
         RemotePeer* peer;
@@ -119,8 +133,10 @@ private:
     
     std::mutex requests_mutex_;
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> pending_requests_;
-    uint64_t next_request_id_ = 1;
-    handle_t next_local_handle_ = 1;
+    // Handed out from application threads; a plain ++ would let two callers
+    // share a request id and receive each other's responses.
+    std::atomic<uint64_t> next_request_id_{1};
+    std::atomic<handle_t> next_local_handle_{1};
     
     // Peer capacity cache TTL
     static constexpr auto PEER_CAPACITY_TTL = std::chrono::seconds(5);

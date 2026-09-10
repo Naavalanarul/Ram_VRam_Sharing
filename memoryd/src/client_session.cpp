@@ -18,7 +18,7 @@ ClientSession::ClientSession(uv_loop_t* loop, uv_stream_t* server, PageTracker* 
     if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&socket_)) == 0) {
         uv_read_start(reinterpret_cast<uv_stream_t*>(&socket_), on_alloc, on_read);
     } else {
-        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
     }
 }
 
@@ -41,7 +41,7 @@ void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* 
         if (nread != UV_EOF) {
             spdlog::error("ClientSession read error: {}", uv_strerror(nread));
         }
-        uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close_handle);
     }
     
     if (buf->base) {
@@ -54,7 +54,7 @@ void ClientSession::process_buffer() {
         uint32_t size = flatbuffers::GetPrefixedSize(read_buffer_.data());
         if (size > MAX_MESSAGE_SIZE) {
             spdlog::error("ClientSession received oversized message");
-            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
             return;
         }
         if (read_buffer_.size() - 4 >= size) {
@@ -72,7 +72,7 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
     
     // Empty response means invalid protocol - close connection
     if (response.empty()) {
-        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
         return;
     }
     
@@ -102,7 +102,7 @@ void ClientSession::on_write_done(uv_write_t* req, int /*status*/) {
     delete ctx;
 }
 
-void ClientSession::on_close(uv_handle_t* handle) {
+void ClientSession::on_close_handle(uv_handle_t* handle) {
     auto* self = static_cast<ClientSession*>(handle->data);
     delete self; // ClientSession owns itself once accepted
 }

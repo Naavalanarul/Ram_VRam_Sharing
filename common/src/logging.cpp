@@ -28,6 +28,11 @@ void init_logging(const std::string& daemon_name,
     else if (level == "error") lvl = spdlog::level::err;
 
     logger->set_level(lvl);
+
+    // register_logger throws if a logger with this name already exists, which
+    // would turn a second init_logging call (a re-init, or two daemons hosted
+    // in one process) into a fatal error.
+    spdlog::drop(daemon_name);
     spdlog::register_logger(logger);
     spdlog::set_default_logger(logger);
 }

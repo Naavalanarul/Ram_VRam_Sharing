@@ -1,6 +1,7 @@
 #include <meminfo/memory/memory_protocol.h>
 #include <meminfo/memory/page_tracker.h>
 #include <meminfo/common/crc32c.h>
+#include <meminfo/common/types.h>
 #include <meminfo/common/protocol_version.h>
 #include <memory_generated.h>
 #include <spdlog/spdlog.h>
@@ -73,6 +74,12 @@ std::vector<uint8_t> MemoryProtocol::process_request(PageTracker* page_tracker, 
             }
             
             case meminfo::memory::OpCode_READ: {
+                // req->size() is attacker-controlled; reserving it before the
+                // handle is validated would let one request ask for gigabytes.
+                if (req->size() > MAX_MESSAGE_SIZE) {
+                    return build_response(builder, req, meminfo::memory::StatusCode_ERROR_GENERIC,
+                                          "Requested read size exceeds maximum message size");
+                }
                 std::vector<uint8_t> read_data(req->size());
                 page_tracker->read(req->handle(), req->offset(), read_data.data(), req->size(), session_id);
                 uint32_t checksum = crc32c(read_data.data(), read_data.size());

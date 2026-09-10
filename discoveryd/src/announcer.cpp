@@ -2,8 +2,9 @@
 #include <meminfo/common/protocol_version.h>
 #include <discovery_generated.h>
 #include <chrono>
+#include <cstring>
 #include <stdexcept>
-#include <iostream>
+#include <spdlog/spdlog.h>
 
 namespace meminfo {
 namespace discovery {
@@ -49,9 +50,27 @@ void Announcer::start() {
     // For simplicity on LAN, we just send to the multicast dest.
     struct sockaddr_in any_addr;
     uv_ip4_addr("0.0.0.0", 0, &any_addr);
-    uv_udp_bind(&udp_handle_, reinterpret_cast<const struct sockaddr*>(&any_addr), 0);
+
+    int r = uv_udp_bind(&udp_handle_, reinterpret_cast<const struct sockaddr*>(&any_addr), 0);
+    if (r < 0) {
+        spdlog::error("Announcer UDP bind failed: {}", uv_strerror(r));
+        return;
+    }
+
     uv_udp_set_multicast_loop(&udp_handle_, 1);
-    uv_udp_set_multicast_interface(&udp_handle_, "127.0.0.1");
+
+    // Send announcements out of the configured interface. Pinning this to
+    // loopback would confine discovery to the local machine, which defeats LAN
+    // discovery entirely; "0.0.0.0" means "let the routing table decide", which
+    // matches how Listener interprets the same setting.
+    if (!listen_address_.empty() && listen_address_ != "0.0.0.0") {
+        r = uv_udp_set_multicast_interface(&udp_handle_, listen_address_.c_str());
+        if (r < 0) {
+            spdlog::warn("Could not set multicast interface to {}: {}",
+                         listen_address_, uv_strerror(r));
+        }
+    }
+
     
     uv_timer_start(&timer_handle_, on_timer, 0, interval_ms_);
     is_running_ = true;

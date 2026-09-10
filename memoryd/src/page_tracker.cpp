@@ -1,5 +1,6 @@
 #include <meminfo/memory/page_tracker.h>
 #include <algorithm>
+#include <limits>
 
 namespace meminfo {
 namespace memory {
@@ -25,6 +26,9 @@ handle_t PageTracker::allocate(size_t size) {
     if (size == 0) return 0;
     
     size_t page_size = allocator_->page_size();
+    if (size > std::numeric_limits<size_t>::max() - (page_size - 1)) {
+        throw std::bad_alloc();
+    }
     size_t pages_needed = (size + page_size - 1) / page_size;
     
     std::vector<size_t> allocated_pages = allocator_->allocate_pages(pages_needed);
@@ -58,7 +62,9 @@ void PageTracker::write(handle_t handle, size_t offset, const uint8_t* data, siz
         total_size = it->second.total_size;
     }
     
-    if (offset + size > total_size) {
+    // Subtraction form: offset + size can wrap for a hostile offset, which
+    // would pass the bound and then index pages[] out of range below.
+    if (offset > total_size || size > total_size - offset) {
         throw std::out_of_range("Write exceeds allocation size");
     }
     
@@ -89,7 +95,9 @@ void PageTracker::read(handle_t handle, size_t offset, uint8_t* out_data, size_t
         total_size = it->second.total_size;
     }
     
-    if (offset + size > total_size) {
+    // Subtraction form: offset + size can wrap for a hostile offset, which
+    // would pass the bound and then index pages[] out of range below.
+    if (offset > total_size || size > total_size - offset) {
         throw std::out_of_range("Read exceeds allocation size");
     }
     
@@ -116,6 +124,10 @@ void PageTracker::assign_owner(handle_t handle, uint64_t owner_id) {
 }
 
 void PageTracker::free_all_for_owner(uint64_t owner_id) {
+    // owner_id 0 is the "unowned" sentinel used by check_ownership; sweeping it
+    // would free every allocation that has not been claimed yet.
+    if (owner_id == 0) return;
+
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = allocations_.begin();
     while (it != allocations_.end()) {
