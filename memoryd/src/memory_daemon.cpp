@@ -12,20 +12,9 @@ MemoryDaemon::MemoryDaemon(const Config& config)
     
     uv_async_init(&loop_, &stop_async_, [](uv_async_t* handle) {
         auto* self = static_cast<MemoryDaemon*>(handle->data);
-        if (self->is_running_) {
-            uv_walk(&self->loop_, [](uv_handle_t* handle, void* /*arg*/) {
-                if (!uv_is_closing(handle) && handle->type == UV_TCP) {
-                    uv_close(handle, [](uv_handle_t* /*h*/) {
-                        // If it's a ClientSession, clean it up
-                        // server_socket_ has its data pointing to MemoryDaemon, so we can't blindly delete.
-                        // We will just let them leak on shutdown or check if it's the server socket.
-                    });
-                }
-            }, nullptr);
-            
-            uv_stop(&self->loop_);
-            self->is_running_ = false;
-        }
+        self->close_sockets();
+        uv_stop(&self->loop_);
+        self->is_running_ = false;
     });
     stop_async_.data = this;
     
@@ -44,11 +33,44 @@ MemoryDaemon::MemoryDaemon(const Config& config)
     });
 }
 
+// Closes the listening socket and every accepted client socket.
+//
+// Must run on the loop thread. Client sessions own themselves and are deleted
+// by their own close callback; the listening socket's data points at this
+// daemon, so it must not go through that path.
+void MemoryDaemon::close_sockets() {
+    uv_walk(&loop_, [](uv_handle_t* handle, void* arg) {
+        auto* self = static_cast<MemoryDaemon*>(arg);
+        if (uv_is_closing(handle) || handle->type != UV_TCP) return;
+
+        if (handle == reinterpret_cast<uv_handle_t*>(&self->server_socket_)) {
+            uv_close(handle, nullptr);
+        } else {
+            // Accepted connection: hand it to the session's own teardown so the
+            // ClientSession is destroyed and its allocations are released.
+            uv_close(handle, ClientSession::on_close_handle);
+        }
+    }, this);
+}
+
 MemoryDaemon::~MemoryDaemon() {
-    stop();
+    // Close everything here rather than signalling stop_async_: the loop is no
+    // longer running by this point, so an async callback would never fire, and
+    // the still-open listening socket would keep the drain below blocked
+    // forever.
+    close_sockets();
+
     sig_handler_.reset(); // Close signal handles
-    uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
-    uv_run(&loop_, UV_RUN_DEFAULT); // Drain remaining closing handles
+
+    if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
+        uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
+    }
+
+    is_running_ = false;
+
+    // Every handle is now closing, so this drains their close callbacks and
+    // returns instead of blocking on live ones.
+    uv_run(&loop_, UV_RUN_DEFAULT);
     uv_loop_close(&loop_);
 }
 
@@ -90,7 +112,10 @@ void MemoryDaemon::run() {
 }
 
 void MemoryDaemon::stop() {
-    if (!is_running_) return;
+    // No is_running_ guard: stop() may legitimately arrive before run() has
+    // flipped the flag, and dropping it there would strand the daemon.
+    // uv_async_send is safe from any thread once the handle is initialised.
+    if (uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) return;
     spdlog::info("Stopping memoryd...");
     uv_async_send(&stop_async_);
 }

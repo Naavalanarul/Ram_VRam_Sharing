@@ -32,6 +32,21 @@ endif()
 include(cmake/Dependencies.cmake)
 
 # ──────────────────────────────────────────────
+# Windows: suppress the min/max macros
+#
+# libuv pulls in <windows.h>, which defines min() and max() as macros unless
+# NOMINMAX is set. Those macros break every std::numeric_limits<T>::max() call
+# in the headers we include -- flatbuffers' FLATBUFFERS_MAX_BUFFER_SIZE among
+# them -- with a confusing "illegal token on right side of '::'".
+#
+# Declared after the dependency fetch above so it applies to our own targets
+# and leaves the third-party ones exactly as they were.
+# ──────────────────────────────────────────────
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
+# ──────────────────────────────────────────────
 # FlatBuffers schema compilation helper
 # ──────────────────────────────────────────────
 include(cmake/FlatBuffersCompile.cmake)
@@ -40,13 +55,19 @@ include(cmake/FlatBuffersCompile.cmake)
 # Strict compiler warnings — applied only to our
 # own targets via this helper function.
 # ──────────────────────────────────────────────
+# -Wextra/-Wpedantic/-Werror are GCC/Clang spellings; MSVC only warns that it is
+# ignoring them (D9002), so it would silently build without strict warnings.
 function(meminfo_set_strict_warnings target)
-    target_compile_options(${target} PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Werror
-    )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+        )
+    endif()
 endfunction()
 
 # ──────────────────────────────────────────────

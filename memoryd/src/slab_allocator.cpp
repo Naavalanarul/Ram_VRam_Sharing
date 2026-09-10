@@ -1,5 +1,6 @@
 #include <meminfo/memory/slab_allocator.h>
 #include <cstring>
+#include <limits>
 #include <new>
 
 namespace meminfo {
@@ -15,7 +16,10 @@ SlabAllocator::SlabAllocator(size_t total_size, size_t page_size)
     if (total_pages_ == 0) {
         throw std::invalid_argument("Total size must be at least one page size");
     }
-    
+    if (total_pages_ > std::numeric_limits<size_t>::max() / page_size_) {
+        throw std::invalid_argument("Total size overflows addressable range");
+    }
+
     buffer_ = new uint8_t[total_pages_ * page_size_];
     page_states_ = std::make_unique<PageState[]>(total_pages_);
     page_locks_ = std::make_unique<std::shared_mutex[]>(total_pages_);
@@ -62,10 +66,13 @@ void SlabAllocator::free_pages(const std::vector<size_t>& pages) {
 }
 
 void SlabAllocator::write_page(size_t page_idx, size_t page_offset, const uint8_t* data, size_t size) {
-    if (page_idx >= total_pages_ || page_offset + size > page_size_) {
+    // Written as a subtraction so a large page_offset cannot wrap the sum and
+    // slip past the bound.
+    if (page_idx >= total_pages_ || page_offset > page_size_ || size > page_size_ - page_offset) {
         throw std::out_of_range("Write out of bounds");
     }
-    std::shared_lock<std::shared_mutex> page_lock(page_locks_[page_idx]);
+    // Exclusive: two writers touching the same page would otherwise race.
+    std::unique_lock<std::shared_mutex> page_lock(page_locks_[page_idx]);
     if (page_states_[page_idx] != PageState::ALLOCATED) {
         throw std::runtime_error("Write to unallocated page");
     }
@@ -73,7 +80,7 @@ void SlabAllocator::write_page(size_t page_idx, size_t page_offset, const uint8_
 }
 
 void SlabAllocator::read_page(size_t page_idx, size_t page_offset, uint8_t* out_data, size_t size) const {
-    if (page_idx >= total_pages_ || page_offset + size > page_size_) {
+    if (page_idx >= total_pages_ || page_offset > page_size_ || size > page_size_ - page_offset) {
         throw std::out_of_range("Read out of bounds");
     }
     std::shared_lock<std::shared_mutex> page_lock(page_locks_[page_idx]);

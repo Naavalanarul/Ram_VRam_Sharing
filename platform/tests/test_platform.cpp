@@ -38,6 +38,14 @@ TEST(PlatformTest, LocalIpc) {
 
 TEST(PlatformTest, PageFault) {
     auto fault = create_page_fault_backend();
+
+    // Linux userfaultfd needs CAP_SYS_PTRACE unless vm.unprivileged_userfaultfd
+    // is set; CI runners generally allow neither. Skip rather than fail, so the
+    // assertions below still run wherever the capability does exist.
+    if (!fault->is_supported()) {
+        GTEST_SKIP() << "Page-fault backend unavailable on this platform/permissions";
+    }
+
     auto region = fault->reserve_region(4096);
     
     ASSERT_NE(region.addr, nullptr);

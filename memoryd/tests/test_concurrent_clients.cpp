@@ -7,6 +7,7 @@
 #include <fstream>
 #include <uv.h>
 #include <vector>
+#include <filesystem>
 
 using namespace meminfo;
 using namespace meminfo::memory;
@@ -21,7 +22,7 @@ TEST(ConcurrentClientsTest, MultipleClientsAllocWriteRead) {
         out << "page_size_bytes = 4096\n";
     };
     
-    std::string cfg_path = "/tmp/meminfo_test_memoryd.toml";
+    std::string cfg_path = (std::filesystem::temp_directory_path() / "meminfo_test_memoryd.toml").string();
     int test_port = 0; // Let OS assign
     write_config(cfg_path, test_port);
     Config config(cfg_path);
@@ -79,7 +80,9 @@ TEST(ConcurrentClientsTest, MultipleClientsAllocWriteRead) {
         uv_read_start(reinterpret_cast<uv_stream_t*>(&client),
             [](uv_handle_t*, size_t suggested, uv_buf_t* b) {
                 b->base = new char[suggested];
-                b->len = suggested;
+                // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+                // assignment narrows there; make the conversion explicit.
+                b->len = static_cast<decltype(b->len)>(suggested);
             },
             [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* b) {
                 auto* out = static_cast<std::vector<uint8_t>*>(stream->data);

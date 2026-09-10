@@ -5,9 +5,17 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <string>
+#include <cstdint>
 
 namespace meminfo {
 namespace platform {
+
+namespace {
+// Mirrors the POSIX backend: bounds a hostile or corrupt length prefix so it
+// cannot turn into a multi-gigabyte allocation, and keeps every length inside
+// the 32-bit range the pipe API and the wire format both use.
+constexpr uint32_t kMaxIpcMessageBytes = 64u * 1024u * 1024u;
+} // namespace
 
 class LocalIpcWin : public ILocalIpc {
 public:
@@ -51,22 +59,9 @@ public:
             while (running_) {
                 BOOL connected = ConnectNamedPipe(server_pipe_, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
                 if (!running_) break;
-                
+
                 if (connected) {
-                    DWORD read_bytes = 0;
-                    uint32_t len = 0;
-                    if (ReadFile(server_pipe_, &len, sizeof(len), &read_bytes, NULL) && read_bytes == sizeof(len)) {
-                        std::vector<uint8_t> req(len);
-                        if (ReadFile(server_pipe_, req.data(), len, &read_bytes, NULL) && read_bytes == len) {
-                            std::vector<uint8_t> resp;
-                            handler_(req, resp);
-                            
-                            uint32_t resp_len = resp.size();
-                            DWORD written = 0;
-                            WriteFile(server_pipe_, &resp_len, sizeof(resp_len), &written, NULL);
-                            WriteFile(server_pipe_, resp.data(), resp.size(), &written, NULL);
-                        }
-                    }
+                    serve_client();
                     FlushFileBuffers(server_pipe_);
                     DisconnectNamedPipe(server_pipe_);
                 }
@@ -75,6 +70,11 @@ public:
     }
 
     std::vector<uint8_t> send_request(const std::string& name, const std::vector<uint8_t>& req) override {
+        if (req.size() > kMaxIpcMessageBytes) {
+            spdlog::error("IPC request too large: {} bytes", req.size());
+            return {};
+        }
+
         std::string pipe_name = "\\\\.\\pipe\\" + name;
         HANDLE hPipe = CreateFileA(
             pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE,
@@ -85,26 +85,72 @@ public:
         DWORD mode = PIPE_READMODE_MESSAGE;
         SetNamedPipeHandleState(hPipe, &mode, NULL, NULL);
         
-        uint32_t len = req.size();
-        DWORD written = 0;
-        WriteFile(hPipe, &len, sizeof(len), &written, NULL);
-        WriteFile(hPipe, req.data(), req.size(), &written, NULL);
-        
-        uint32_t resp_len = 0;
-        DWORD read_bytes = 0;
         std::vector<uint8_t> resp;
-        if (ReadFile(hPipe, &resp_len, sizeof(resp_len), &read_bytes, NULL) && read_bytes == sizeof(resp_len)) {
-            resp.resize(resp_len);
-            if (ReadFile(hPipe, resp.data(), resp_len, &read_bytes, NULL) && read_bytes == resp_len) {
-                // Success
+        const uint32_t len = static_cast<uint32_t>(req.size());
+        DWORD written = 0;
+
+        if (WriteFile(hPipe, &len, sizeof(len), &written, NULL) &&
+            (len == 0 || WriteFile(hPipe, req.data(), static_cast<DWORD>(req.size()), &written, NULL))) {
+
+            uint32_t resp_len = 0;
+            DWORD read_bytes = 0;
+            if (ReadFile(hPipe, &resp_len, sizeof(resp_len), &read_bytes, NULL) &&
+                read_bytes == sizeof(resp_len)) {
+                if (resp_len > kMaxIpcMessageBytes) {
+                    spdlog::error("IPC response too large: {} bytes", resp_len);
+                } else if (resp_len > 0) {
+                    resp.resize(resp_len);
+                    if (!ReadFile(hPipe, resp.data(), resp_len, &read_bytes, NULL) ||
+                        read_bytes != resp_len) {
+                        resp.clear();
+                    }
+                }
             }
         }
-        
+
         CloseHandle(hPipe);
         return resp;
     }
 
 private:
+    // Reads one length-prefixed request, runs the handler, writes the reply.
+    void serve_client() {
+        DWORD read_bytes = 0;
+        uint32_t len = 0;
+        if (!ReadFile(server_pipe_, &len, sizeof(len), &read_bytes, NULL) ||
+            read_bytes != sizeof(len)) {
+            return;
+        }
+        if (len > kMaxIpcMessageBytes) {
+            spdlog::error("IPC request too large: {} bytes", len);
+            return;
+        }
+
+        std::vector<uint8_t> req(len);
+        if (len > 0 &&
+            (!ReadFile(server_pipe_, req.data(), len, &read_bytes, NULL) || read_bytes != len)) {
+            return;
+        }
+
+        std::vector<uint8_t> resp;
+        if (handler_) {
+            handler_(req, resp);
+        }
+        if (resp.size() > kMaxIpcMessageBytes) {
+            spdlog::error("IPC response too large: {} bytes", resp.size());
+            return;
+        }
+
+        const uint32_t resp_len = static_cast<uint32_t>(resp.size());
+        DWORD written = 0;
+        if (!WriteFile(server_pipe_, &resp_len, sizeof(resp_len), &written, NULL)) {
+            return;
+        }
+        if (resp_len > 0) {
+            WriteFile(server_pipe_, resp.data(), static_cast<DWORD>(resp.size()), &written, NULL);
+        }
+    }
+
     HANDLE server_pipe_ = INVALID_HANDLE_VALUE;
     std::string pipe_name_;
     std::thread listen_thread_;

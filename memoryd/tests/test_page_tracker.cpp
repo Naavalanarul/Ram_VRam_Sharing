@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 #include <meminfo/memory/slab_allocator.h>
 #include <meminfo/memory/page_tracker.h>
+#include <limits>
+#include <vector>
 
 using namespace meminfo::memory;
 
@@ -101,4 +103,40 @@ TEST(PageTrackerTest, ConcurrentFreeAndWrite) {
     
     // Should not crash and should leave everything clean
     EXPECT_EQ(alloc.free_pages_count(), 10);
+}
+
+// An offset chosen so offset + size wraps used to pass the "exceeds allocation
+// size" check and then index the page vector out of range.
+TEST(PageTrackerTest, OffsetOverflowIsRejected) {
+    SlabAllocator alloc(4096 * 10, 4096);
+    PageTracker tracker(&alloc);
+
+    meminfo::handle_t h = tracker.allocate(8192);
+    tracker.assign_owner(h, 1);
+
+    constexpr size_t kMax = std::numeric_limits<size_t>::max();
+    std::vector<uint8_t> buf(16, 0);
+
+    EXPECT_THROW(tracker.write(h, kMax - 7, buf.data(), 16, 1), std::out_of_range);
+    EXPECT_THROW(tracker.read(h, kMax - 7, buf.data(), 16, 1), std::out_of_range);
+
+    // Plain overruns must still be rejected.
+    EXPECT_THROW(tracker.write(h, 8190, buf.data(), 16, 1), std::out_of_range);
+
+    // A write ending exactly at the allocation boundary stays valid.
+    EXPECT_NO_THROW(tracker.write(h, 8192 - 16, buf.data(), 16, 1));
+}
+
+// owner_id 0 is the "unowned" sentinel; sweeping it must not free allocations
+// that simply have not been claimed yet.
+TEST(PageTrackerTest, FreeAllForOwnerIgnoresUnownedSentinel) {
+    SlabAllocator alloc(4096 * 10, 4096);
+    PageTracker tracker(&alloc);
+
+    tracker.allocate(4096); // deliberately left unowned
+    size_t free_before = alloc.free_pages_count();
+
+    tracker.free_all_for_owner(0);
+
+    EXPECT_EQ(alloc.free_pages_count(), free_before);
 }

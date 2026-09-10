@@ -2,7 +2,7 @@
 #include <meminfo/common/protocol_version.h>
 #include <discovery_generated.h>
 #include <stdexcept>
-#include <iostream>
+#include <algorithm>
 
 namespace meminfo {
 namespace discovery {
@@ -68,7 +68,9 @@ void Listener::stop() {
 
 void Listener::on_alloc(uv_handle_t* /*handle*/, size_t suggested_size, uv_buf_t* buf) {
     buf->base = new char[suggested_size];
-    buf->len = suggested_size;
+    // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+    // assignment narrows there; make the conversion explicit.
+    buf->len = static_cast<decltype(buf->len)>(suggested_size);
 }
 
 void Listener::on_recv(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf, 
@@ -82,11 +84,16 @@ void Listener::on_recv(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
             
             if (check_protocol_version(ann->protocol_version())) {
                 PeerInfo info;
-                
+
+                // The node id is the peer table's key. An announcement without
+                // a well-formed one would land under the all-zero id, where
+                // every such sender would overwrite the others.
                 auto fb_node_id = ann->node_id();
-                if (fb_node_id && fb_node_id->size() == info.id.size()) {
-                    std::copy(fb_node_id->begin(), fb_node_id->end(), info.id.begin());
+                if (!fb_node_id || fb_node_id->size() != info.id.size()) {
+                    if (buf->base) delete[] buf->base;
+                    return;
                 }
+                std::copy(fb_node_id->begin(), fb_node_id->end(), info.id.begin());
                 
                 if (ann->hostname()) info.hostname = ann->hostname()->str();
                 if (ann->listen_address()) info.address = ann->listen_address()->str();

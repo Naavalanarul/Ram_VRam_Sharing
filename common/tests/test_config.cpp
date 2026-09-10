@@ -3,6 +3,7 @@
 #include <fstream>
 #include <cstdio>
 #include <stdexcept>
+#include <filesystem>
 
 using namespace meminfo;
 
@@ -18,7 +19,7 @@ protected:
         std::remove(test_file.c_str());
     }
     
-    std::string test_file = "/tmp/meminfo_test_config.toml";
+    std::string test_file = (std::filesystem::temp_directory_path() / "meminfo_test_config.toml").string();
 };
 
 TEST_F(ConfigTest, DefaultConstructor) {
@@ -45,7 +46,7 @@ TEST_F(ConfigTest, HasReturnsCorrectResults) {
 }
 
 TEST_F(ConfigTest, LoadingInvalidThrows) {
-    std::string invalid_file = "/tmp/meminfo_invalid_config.toml";
+    std::string invalid_file = (std::filesystem::temp_directory_path() / "meminfo_invalid_config.toml").string();
     std::ofstream out(invalid_file);
     out << "[server\nport = ";
     out.close();

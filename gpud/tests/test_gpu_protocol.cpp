@@ -6,13 +6,14 @@
 #include <chrono>
 #include <fstream>
 #include <vector>
+#include <filesystem>
 
 using namespace meminfo;
 using namespace meminfo::gpu;
 
 TEST(GpuProtocolTest, EndToEndFlow) {
     // 1. Create a GpuDaemon on a random port
-    std::string config_path = "/tmp/meminfo_test_gpud.toml";
+    std::string config_path = (std::filesystem::temp_directory_path() / "meminfo_test_gpud.toml").string();
     std::ofstream out(config_path);
     out << "[gpu]\n"
         << "listen_address = \"127.0.0.1\"\n"

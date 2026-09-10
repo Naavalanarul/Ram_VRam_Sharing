@@ -3,14 +3,23 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <sstream>
-#include <unistd.h>
-
-#ifdef __linux__
-#include <unistd.h>
-#endif
+#include <cstdint>
 
 namespace meminfo {
 namespace discovery {
+
+namespace {
+// Ports arrive from the config as int but are announced as uint16_t. Narrow
+// explicitly so the conversion is intentional, and fall back to 0 (disabled)
+// for a value that could not round-trip, rather than truncating it silently.
+uint16_t to_port(int value, const char* what) {
+    if (value < 0 || value > 65535) {
+        spdlog::warn("Ignoring out-of-range {} value {}; disabling", what, value);
+        return 0;
+    }
+    return static_cast<uint16_t>(value);
+}
+} // namespace
 
 DiscoveryDaemon::DiscoveryDaemon(const Config& config) 
     : config_(config) {
@@ -32,15 +41,21 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     // Generate UUID if not present (simple placeholder)
     local_id_ = generate_uuid();
     
+    // uv_os_gethostname() rather than POSIX gethostname(): <unistd.h> does not
+    // exist on MSVC, and the Windows equivalent lives in <winsock2.h> and needs
+    // WSAStartup first. libuv is already a dependency and handles both.
     local_hostname_ = "localhost";
-    char host_buf[256];
-    if (gethostname(host_buf, sizeof(host_buf)) == 0) {
-        local_hostname_ = host_buf;
+    char host_buf[UV_MAXHOSTNAMESIZE];
+    size_t host_len = sizeof(host_buf);
+    if (uv_os_gethostname(host_buf, &host_len) == 0) {
+        local_hostname_.assign(host_buf, host_len);
     }
     
     listen_address_ = config_.get<std::string>("discovery", "listen_address", "0.0.0.0");
-    memory_port_ = config_.get<int>("discovery", "memory_port", 9200);
-    gpu_port_ = config_.get<int>("discovery", "gpu_port", 9300);
+    // Ports are announced as uint16_t; narrow explicitly and reject values that
+    // could not round-trip rather than silently truncating a bad config.
+    memory_port_ = to_port(config_.get<int>("discovery", "memory_port", 9200), "memory_port");
+    gpu_port_ = to_port(config_.get<int>("discovery", "gpu_port", 9300), "gpu_port");
     
     std::string mcast_ip = config_.get<std::string>("discovery", "multicast_group", "239.255.73.77");
     int mcast_port = config_.get<int>("discovery", "multicast_port", 9100);
@@ -70,21 +85,28 @@ DiscoveryDaemon::~DiscoveryDaemon() {
     if (listener_) listener_->stop();
     if (announcer_) announcer_->stop();
     
-    if (uv_is_active(reinterpret_cast<uv_handle_t*>(&stop_async_)) || !uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
+    if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
         uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
     }
-    
-    // Drain all closing handles while memory is still valid
-    for (int i = 0; i < 10; ++i) {
-        uv_run(&loop_, UV_RUN_NOWAIT);
-    }
-    
+
+    // The signal handles must be closed before the drain, not after: closing
+    // them afterwards left them un-drained, uv_loop_close() then failed with
+    // EBUSY, and the loop's internals leaked.
     sig_handler_.reset();
+
+    // Everything is closing now, so this returns once their close callbacks
+    // have run rather than blocking on a live handle. The previous fixed
+    // ten-iteration NOWAIT drain could finish with callbacks still pending.
+    uv_run(&loop_, UV_RUN_DEFAULT);
+
     control_socket_.reset();
     listener_.reset();
     announcer_.reset();
-    
-    uv_loop_close(&loop_);
+
+    int rc = uv_loop_close(&loop_);
+    if (rc != 0) {
+        spdlog::warn("discoveryd loop did not close cleanly: {}", uv_strerror(rc));
+    }
 }
 
 void DiscoveryDaemon::run() {

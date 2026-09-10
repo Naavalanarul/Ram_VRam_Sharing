@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
         MemoryClient client(local_cache_size, discovery_sock);
         
         spdlog::info("Allocating 1024 bytes...");
-        handle_t h = client.allocate(1024);
+        meminfo::handle_t h = client.allocate(1024);
         spdlog::info("Got handle: {}", h);
         
         std::vector<uint8_t> data = {0xDE, 0xAD, 0xBE, 0xEF};

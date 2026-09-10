@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <meminfo/memory/slab_allocator.h>
+#include <limits>
 
 using namespace meminfo::memory;
 
@@ -38,4 +39,25 @@ TEST(SlabAllocatorTest, OutOfMemoryThrows) {
     SlabAllocator alloc(4096 * 2, 4096); // 2 pages
     EXPECT_NO_THROW(alloc.allocate_pages(2));
     EXPECT_THROW(alloc.allocate_pages(1), std::bad_alloc);
+}
+
+// A page_offset large enough to wrap page_offset + size used to slip past the
+// bounds check and memcpy outside the slab.
+TEST(SlabAllocatorTest, OffsetOverflowIsRejected) {
+    SlabAllocator alloc(4096 * 2, 4096);
+    auto pages = alloc.allocate_pages(1);
+
+    constexpr size_t kMax = std::numeric_limits<size_t>::max();
+    uint8_t buf[8] = {0};
+
+    // kMax - 3 + 8 wraps to 4, which is <= page_size.
+    EXPECT_THROW(alloc.write_page(pages[0], kMax - 3, buf, 8), std::out_of_range);
+    EXPECT_THROW(alloc.read_page(pages[0], kMax - 3, buf, 8), std::out_of_range);
+
+    // Ordinary out-of-range offsets must still be rejected.
+    EXPECT_THROW(alloc.write_page(pages[0], 4090, buf, 8), std::out_of_range);
+    EXPECT_THROW(alloc.read_page(pages[0], 4096, buf, 1), std::out_of_range);
+
+    // ...and a legitimate write at the very end of the page must still work.
+    EXPECT_NO_THROW(alloc.write_page(pages[0], 4088, buf, 8));
 }

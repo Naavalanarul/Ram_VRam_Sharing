@@ -13,6 +13,12 @@ struct PageRegion {
 
 class IPageFaultBackend {
 public:
+    // False when the OS cannot provide fault handling in this process --
+    // notably Linux userfaultfd, which needs CAP_SYS_PTRACE unless
+    // vm.unprivileged_userfaultfd is enabled. Callers should treat the backend
+    // as unavailable rather than assume reserve_region() will succeed.
+    virtual bool is_supported() const = 0;
+
     virtual PageRegion reserve_region(size_t bytes) = 0;
     
     // Called when a reserved page is touched. 

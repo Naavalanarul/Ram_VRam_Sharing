@@ -20,6 +20,8 @@ public:
         }
     }
 
+    bool is_supported() const override { return veh_handle_ != nullptr; }
+
     PageRegion reserve_region(size_t bytes) override {
         void* addr = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
         if (!addr) {

@@ -18,7 +18,7 @@ ClientSession::ClientSession(uv_loop_t* loop, uv_stream_t* server, PageTracker* 
     if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&socket_)) == 0) {
         uv_read_start(reinterpret_cast<uv_stream_t*>(&socket_), on_alloc, on_read);
     } else {
-        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
     }
 }
 
@@ -28,7 +28,9 @@ ClientSession::~ClientSession() {
 
 void ClientSession::on_alloc(uv_handle_t* /*handle*/, size_t suggested_size, uv_buf_t* buf) {
     buf->base = new char[suggested_size];
-    buf->len = suggested_size;
+    // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+    // assignment narrows there; make the conversion explicit.
+    buf->len = static_cast<decltype(buf->len)>(suggested_size);
 }
 
 void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
@@ -39,9 +41,9 @@ void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* 
         self->process_buffer();
     } else if (nread < 0) {
         if (nread != UV_EOF) {
-            spdlog::error("ClientSession read error: {}", uv_strerror(nread));
+            spdlog::error("ClientSession read error: {}", uv_strerror(static_cast<int>(nread)));
         }
-        uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close_handle);
     }
     
     if (buf->base) {
@@ -54,7 +56,7 @@ void ClientSession::process_buffer() {
         uint32_t size = flatbuffers::GetPrefixedSize(read_buffer_.data());
         if (size > MAX_MESSAGE_SIZE) {
             spdlog::error("ClientSession received oversized message");
-            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
             return;
         }
         if (read_buffer_.size() - 4 >= size) {
@@ -72,7 +74,7 @@ void ClientSession::handle_request(const uint8_t* data, size_t size) {
     
     // Empty response means invalid protocol - close connection
     if (response.empty()) {
-        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
         return;
     }
     
@@ -92,7 +94,7 @@ void ClientSession::send_response(const uint8_t* data, size_t size) {
     std::memcpy(ctx->buf_base, data, size);
     ctx->req.data = ctx;
     
-    uv_buf_t buf = uv_buf_init(ctx->buf_base, size);
+    uv_buf_t buf = uv_buf_init(ctx->buf_base, static_cast<unsigned int>(size));
     uv_write(&ctx->req, reinterpret_cast<uv_stream_t*>(&socket_), &buf, 1, on_write_done);
 }
 
@@ -102,7 +104,7 @@ void ClientSession::on_write_done(uv_write_t* req, int /*status*/) {
     delete ctx;
 }
 
-void ClientSession::on_close(uv_handle_t* handle) {
+void ClientSession::on_close_handle(uv_handle_t* handle) {
     auto* self = static_cast<ClientSession*>(handle->data);
     delete self; // ClientSession owns itself once accepted
 }

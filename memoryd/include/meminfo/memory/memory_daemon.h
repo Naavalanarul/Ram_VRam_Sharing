@@ -1,5 +1,6 @@
 #pragma once
 #include <uv.h>
+#include <atomic>
 #include <string>
 #include <memory>
 #include <meminfo/common/config.h>
@@ -21,6 +22,8 @@ public:
 
 private:
     static void on_connection(uv_stream_t* server, int status);
+    // Closes the listening socket and all accepted sessions. Loop thread only.
+    void close_sockets();
 
     Config config_;
     uv_loop_t loop_;
@@ -31,7 +34,7 @@ private:
     
     uv_tcp_t server_socket_;
     uint64_t next_session_id_ = 1;
-    bool is_running_ = false;
+    std::atomic<bool> is_running_{false}; // read from the caller's thread, set on the loop thread
     int listen_port_ = 0;
     
     std::unique_ptr<SignalHandler> sig_handler_;
