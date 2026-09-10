@@ -42,12 +42,12 @@ TEST(MemoryClientTest, EvictionAndReadback) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
     // 3. Allocate handle 1 (10 bytes), fits in local
-    handle_t h1 = client.allocate(10);
+    meminfo::handle_t h1 = client.allocate(10);
     std::vector<uint8_t> data1(10, 'A');
     client.write(h1, 0, data1);
     
     // 4. Allocate handle 2 (15 bytes), forces h1 to evict
-    handle_t h2 = client.allocate(15);
+    meminfo::handle_t h2 = client.allocate(15);
     std::vector<uint8_t> data2(15, 'B');
     client.write(h2, 0, data2);
     
