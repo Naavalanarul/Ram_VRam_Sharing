@@ -7,6 +7,7 @@
 #include <fstream>
 #include <uv.h>
 #include <vector>
+#include <filesystem>
 
 using namespace meminfo;
 using namespace meminfo::memory;
@@ -21,7 +22,7 @@ TEST(PeerDisconnectTest, SessionCleanupOnDisconnect) {
         out << "page_size_bytes = 4096\n";
     };
     
-    std::string cfg_path = "/tmp/meminfo_test_memoryd2.toml";
+    std::string cfg_path = (std::filesystem::temp_directory_path() / "meminfo_test_memoryd2.toml").string();
     write_config(cfg_path);
     Config config(cfg_path);
     

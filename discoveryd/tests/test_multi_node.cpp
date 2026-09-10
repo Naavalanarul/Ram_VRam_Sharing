@@ -24,13 +24,21 @@ TEST(MultiNodeTest, ThreeNodesDiscoverEachOther) {
         out << "announce_interval_ms = 100\n";
     };
     
-    std::string cfg1 = "/tmp/meminfo_test_d1.toml";
-    std::string cfg2 = "/tmp/meminfo_test_d2.toml";
-    std::string cfg3 = "/tmp/meminfo_test_d3.toml";
+    // /tmp does not exist on Windows; temp_directory_path() is the portable form.
+    const auto tmp = std::filesystem::temp_directory_path();
+    std::string cfg1 = (tmp / "meminfo_test_d1.toml").string();
+    std::string cfg2 = (tmp / "meminfo_test_d2.toml").string();
+    std::string cfg3 = (tmp / "meminfo_test_d3.toml").string();
     
-    write_config(cfg1, 9201, 9301, "/tmp/sock1");
-    write_config(cfg2, 9202, 9302, "/tmp/sock2");
-    write_config(cfg3, 9203, 9303, "/tmp/sock3");
+    // Bare relative names: a UDS path in the CWD on POSIX, and a valid named-pipe
+    // name on Windows (which forbids backslashes after the \\.\pipe\ prefix).
+    const std::string sock1 = "meminfo_test_sock1";
+    const std::string sock2 = "meminfo_test_sock2";
+    const std::string sock3 = "meminfo_test_sock3";
+
+    write_config(cfg1, 9201, 9301, sock1);
+    write_config(cfg2, 9202, 9302, sock2);
+    write_config(cfg3, 9203, 9303, sock3);
     
     Config c1(cfg1), c2(cfg2), c3(cfg3);
     
@@ -72,9 +80,9 @@ TEST(MultiNodeTest, ThreeNodesDiscoverEachOther) {
         return count;
     };
     
-    size_t peers1 = query_peers("/tmp/sock1");
-    size_t peers2 = query_peers("/tmp/sock2");
-    size_t peers3 = query_peers("/tmp/sock3");
+    size_t peers1 = query_peers(sock1);
+    size_t peers2 = query_peers(sock2);
+    size_t peers3 = query_peers(sock3);
     
     // Each should see the other 2 peers
     EXPECT_EQ(peers1, 3);

@@ -5,6 +5,7 @@
 #include <thread>
 #include <fstream>
 #include <chrono>
+#include <filesystem>
 
 using namespace meminfo;
 using namespace meminfo::client;
@@ -14,7 +15,7 @@ TEST(MemoryClientTest, EvictionAndReadback) {
     // 1. Create a MemoryDaemon on an OS-assigned port. A fixed port collides
     //    with the cluster integration script (which also binds 9255) and with
     //    any daemon a previous test left behind.
-    std::string config_path = "/tmp/meminfo_test_client_api.toml";
+    std::string config_path = (std::filesystem::temp_directory_path() / "meminfo_test_client_api.toml").string();
     std::ofstream out(config_path);
     out << "[memory]\n"
         << "listen_address = \"127.0.0.1\"\n"
