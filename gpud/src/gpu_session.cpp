@@ -42,7 +42,7 @@ void GpuSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf
         self->process_buffer();
     } else if (nread < 0) {
         if (nread != UV_EOF) {
-            spdlog::error("GpuSession {} read error: {}", self->session_id_, uv_strerror(nread));
+            spdlog::error("GpuSession {} read error: {}", self->session_id_, uv_strerror(static_cast<int>(nread)));
         }
         if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(stream))) {
             uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close);
@@ -92,7 +92,7 @@ void GpuSession::handle_request(const uint8_t* data, size_t size) {
     std::memcpy(ctx->buf_base, response.data(), response.size());
     ctx->req.data = ctx;
     
-    uv_buf_t buf = uv_buf_init(ctx->buf_base, response.size());
+    uv_buf_t buf = uv_buf_init(ctx->buf_base, static_cast<unsigned int>(response.size()));
     uv_write(&ctx->req, reinterpret_cast<uv_stream_t*>(&socket_), &buf, 1, on_write_done);
 }
 

@@ -39,7 +39,7 @@ void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* 
         self->process_buffer();
     } else if (nread < 0) {
         if (nread != UV_EOF) {
-            spdlog::error("ClientSession read error: {}", uv_strerror(nread));
+            spdlog::error("ClientSession read error: {}", uv_strerror(static_cast<int>(nread)));
         }
         uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close_handle);
     }
@@ -92,7 +92,7 @@ void ClientSession::send_response(const uint8_t* data, size_t size) {
     std::memcpy(ctx->buf_base, data, size);
     ctx->req.data = ctx;
     
-    uv_buf_t buf = uv_buf_init(ctx->buf_base, size);
+    uv_buf_t buf = uv_buf_init(ctx->buf_base, static_cast<unsigned int>(size));
     uv_write(&ctx->req, reinterpret_cast<uv_stream_t*>(&socket_), &buf, 1, on_write_done);
 }
 

@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <fstream>
 #include <sstream>
+#include <cstdint>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -11,6 +12,19 @@
 
 namespace meminfo {
 namespace discovery {
+
+namespace {
+// Ports arrive from the config as int but are announced as uint16_t. Narrow
+// explicitly so the conversion is intentional, and fall back to 0 (disabled)
+// for a value that could not round-trip, rather than truncating it silently.
+uint16_t to_port(int value, const char* what) {
+    if (value < 0 || value > 65535) {
+        spdlog::warn("Ignoring out-of-range {} value {}; disabling", what, value);
+        return 0;
+    }
+    return static_cast<uint16_t>(value);
+}
+} // namespace
 
 DiscoveryDaemon::DiscoveryDaemon(const Config& config) 
     : config_(config) {
@@ -39,8 +53,10 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     }
     
     listen_address_ = config_.get<std::string>("discovery", "listen_address", "0.0.0.0");
-    memory_port_ = config_.get<int>("discovery", "memory_port", 9200);
-    gpu_port_ = config_.get<int>("discovery", "gpu_port", 9300);
+    // Ports are announced as uint16_t; narrow explicitly and reject values that
+    // could not round-trip rather than silently truncating a bad config.
+    memory_port_ = to_port(config_.get<int>("discovery", "memory_port", 9200), "memory_port");
+    gpu_port_ = to_port(config_.get<int>("discovery", "gpu_port", 9300), "gpu_port");
     
     std::string mcast_ip = config_.get<std::string>("discovery", "multicast_group", "239.255.73.77");
     int mcast_port = config_.get<int>("discovery", "multicast_port", 9100);

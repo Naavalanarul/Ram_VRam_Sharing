@@ -47,7 +47,8 @@ GpuClient::GpuClient(const std::string& ip, int port) {
                 
                 auto* wr = new WriteReq;
                 wr->buf_data = std::move(msg.payload);
-                uv_buf_t buf = uv_buf_init(reinterpret_cast<char*>(wr->buf_data.data()), wr->buf_data.size());
+                uv_buf_t buf = uv_buf_init(reinterpret_cast<char*>(wr->buf_data.data()),
+                                           static_cast<unsigned int>(wr->buf_data.size()));
                 
                 uv_write(&wr->req, reinterpret_cast<uv_stream_t*>(self->peer_->socket), &buf, 1, [](uv_write_t* req, int) {
                     delete static_cast<WriteReq*>(req->data);

@@ -135,7 +135,7 @@ void Announcer::on_timer(uv_timer_t* handle) {
     SendReqCtx* ctx = new SendReqCtx;
     ctx->buf_base = data;
     
-    uv_buf_t buf = uv_buf_init(ctx->buf_base, size);
+    uv_buf_t buf = uv_buf_init(ctx->buf_base, static_cast<unsigned int>(size));
     ctx->req.data = ctx;
     
     uv_udp_send(&ctx->req, &self->udp_handle_, &buf, 1, 
