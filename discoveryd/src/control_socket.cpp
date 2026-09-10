@@ -59,12 +59,14 @@ void ControlSocket::handle_request(const std::vector<uint8_t>& data, std::vector
             auto peers = peer_table_->get_peers();
             for (const auto& p : peers) {
                 auto fb_id = builder.CreateVector(p.id.data(), p.id.size());
-                auto fb_hostname = builder.CreateString(p.hostname);
+                // Distinct from the daemon-level fb_hostname above; shadowing it
+                // is both confusing and an error under MSVC /W4 /WX (C4456).
+                auto fb_peer_hostname = builder.CreateString(p.hostname);
                 auto fb_address = builder.CreateString(p.address);
-                
+
                 meminfo::control::PeerInfoBuilder pib(builder);
                 pib.add_node_id(fb_id);
-                pib.add_hostname(fb_hostname);
+                pib.add_hostname(fb_peer_hostname);
                 pib.add_address(fb_address);
                 pib.add_free_ram_bytes(p.free_ram_bytes);
                 pib.add_free_vram_bytes(p.free_vram_bytes);

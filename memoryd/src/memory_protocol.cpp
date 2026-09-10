@@ -98,7 +98,9 @@ std::vector<uint8_t> MemoryProtocol::process_request(PageTracker* page_tracker, 
         return build_response(builder, req, meminfo::memory::StatusCode_PERMISSION_DENIED, e.what());
     } catch (const std::invalid_argument& e) {
         return build_response(builder, req, meminfo::memory::StatusCode_INVALID_HANDLE, e.what());
-    } catch (const std::bad_alloc& e) {
+    } catch (const std::bad_alloc&) {
+        // No binding: the message is fixed, and an unused name is an error
+        // under MSVC /W4 /WX (C4101).
         return build_response(builder, req, meminfo::memory::StatusCode_OUT_OF_MEMORY, "Not enough contiguous free pages");
     } catch (const std::exception& e) {
         return build_response(builder, req, meminfo::memory::StatusCode_ERROR_GENERIC, e.what());

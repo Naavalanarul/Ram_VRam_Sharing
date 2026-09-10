@@ -32,6 +32,21 @@ endif()
 include(cmake/Dependencies.cmake)
 
 # ──────────────────────────────────────────────
+# Windows: suppress the min/max macros
+#
+# libuv pulls in <windows.h>, which defines min() and max() as macros unless
+# NOMINMAX is set. Those macros break every std::numeric_limits<T>::max() call
+# in the headers we include -- flatbuffers' FLATBUFFERS_MAX_BUFFER_SIZE among
+# them -- with a confusing "illegal token on right side of '::'".
+#
+# Declared after the dependency fetch above so it applies to our own targets
+# and leaves the third-party ones exactly as they were.
+# ──────────────────────────────────────────────
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
+# ──────────────────────────────────────────────
 # FlatBuffers schema compilation helper
 # ──────────────────────────────────────────────
 include(cmake/FlatBuffersCompile.cmake)

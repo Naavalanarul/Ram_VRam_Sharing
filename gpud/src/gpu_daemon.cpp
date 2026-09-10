@@ -20,9 +20,9 @@ GpuDaemon::GpuDaemon(const Config& config)
     uv_async_init(&loop_, &stop_async_, [](uv_async_t* handle) {
         auto* self = static_cast<GpuDaemon*>(handle->data);
         if (self->is_running_) {
-            uv_walk(&self->loop_, [](uv_handle_t* handle, void* /*arg*/) {
-                if (!uv_is_closing(handle) && handle->type == UV_TCP) {
-                    uv_close(handle, [](uv_handle_t* /*h*/) { });
+            uv_walk(&self->loop_, [](uv_handle_t* walked, void* /*arg*/) {
+                if (!uv_is_closing(walked) && walked->type == UV_TCP) {
+                    uv_close(walked, [](uv_handle_t* /*h*/) { });
                 }
             }, nullptr);
             uv_stop(&self->loop_);
