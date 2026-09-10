@@ -25,7 +25,9 @@ public:
 
         uffd_ = static_cast<int>(syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK));
         if (uffd_ == -1) {
-            spdlog::error("userfaultfd syscall failed");
+            // Commonly EPERM: unprivileged userfaultfd is disabled by default
+            // on many kernels. Not fatal -- callers check is_supported().
+            spdlog::warn("userfaultfd unavailable: {}", std::strerror(errno));
             return;
         }
 
@@ -51,6 +53,8 @@ public:
             close(uffd_);
         }
     }
+
+    bool is_supported() const override { return uffd_ != -1; }
 
     PageRegion reserve_region(size_t bytes) override {
         void* addr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

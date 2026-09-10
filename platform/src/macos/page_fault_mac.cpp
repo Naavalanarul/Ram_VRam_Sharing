@@ -28,6 +28,8 @@ public:
         sigaction(SIGBUS, &sa, nullptr);
     }
 
+    bool is_supported() const override { return true; }
+
     PageRegion reserve_region(size_t bytes) override {
         void* addr = mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (addr == MAP_FAILED) {

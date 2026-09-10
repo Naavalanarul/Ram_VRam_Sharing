@@ -40,13 +40,19 @@ include(cmake/FlatBuffersCompile.cmake)
 # Strict compiler warnings — applied only to our
 # own targets via this helper function.
 # ──────────────────────────────────────────────
+# -Wextra/-Wpedantic/-Werror are GCC/Clang spellings; MSVC only warns that it is
+# ignoring them (D9002), so it would silently build without strict warnings.
 function(meminfo_set_strict_warnings target)
-    target_compile_options(${target} PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Werror
-    )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+        )
+    endif()
 endfunction()
 
 # ──────────────────────────────────────────────
