@@ -85,21 +85,28 @@ DiscoveryDaemon::~DiscoveryDaemon() {
     if (listener_) listener_->stop();
     if (announcer_) announcer_->stop();
     
-    if (uv_is_active(reinterpret_cast<uv_handle_t*>(&stop_async_)) || !uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
+    if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
         uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
     }
-    
-    // Drain all closing handles while memory is still valid
-    for (int i = 0; i < 10; ++i) {
-        uv_run(&loop_, UV_RUN_NOWAIT);
-    }
-    
+
+    // The signal handles must be closed before the drain, not after: closing
+    // them afterwards left them un-drained, uv_loop_close() then failed with
+    // EBUSY, and the loop's internals leaked.
     sig_handler_.reset();
+
+    // Everything is closing now, so this returns once their close callbacks
+    // have run rather than blocking on a live handle. The previous fixed
+    // ten-iteration NOWAIT drain could finish with callbacks still pending.
+    uv_run(&loop_, UV_RUN_DEFAULT);
+
     control_socket_.reset();
     listener_.reset();
     announcer_.reset();
-    
-    uv_loop_close(&loop_);
+
+    int rc = uv_loop_close(&loop_);
+    if (rc != 0) {
+        spdlog::warn("discoveryd loop did not close cleanly: {}", uv_strerror(rc));
+    }
 }
 
 void DiscoveryDaemon::run() {

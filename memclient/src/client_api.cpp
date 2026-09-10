@@ -794,8 +794,14 @@ void MemoryClient::on_peer_read(uv_stream_t* stream, ssize_t nread, const uv_buf
         peer->connected = false;
         fail_pending_requests(peer->client);
 
+        // Must free the handle here. A nullptr callback would leak it, and the
+        // shutdown walk skips handles that are already closing, so nothing else
+        // would ever reclaim it.
         if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(stream))) {
-            uv_close(reinterpret_cast<uv_handle_t*>(stream), nullptr);
+            peer->socket = nullptr;
+            uv_close(reinterpret_cast<uv_handle_t*>(stream), [](uv_handle_t* h) {
+                delete reinterpret_cast<uv_tcp_t*>(h);
+            });
         }
     }
     if (buf->base) delete[] buf->base;

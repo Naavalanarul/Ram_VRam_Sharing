@@ -19,15 +19,9 @@ GpuDaemon::GpuDaemon(const Config& config)
     
     uv_async_init(&loop_, &stop_async_, [](uv_async_t* handle) {
         auto* self = static_cast<GpuDaemon*>(handle->data);
-        if (self->is_running_) {
-            uv_walk(&self->loop_, [](uv_handle_t* walked, void* /*arg*/) {
-                if (!uv_is_closing(walked) && walked->type == UV_TCP) {
-                    uv_close(walked, [](uv_handle_t* /*h*/) { });
-                }
-            }, nullptr);
-            uv_stop(&self->loop_);
-            self->is_running_ = false;
-        }
+        self->close_sockets();
+        uv_stop(&self->loop_);
+        self->is_running_ = false;
     });
     stop_async_.data = this;
     
@@ -50,9 +44,35 @@ GpuDaemon::GpuDaemon(const Config& config)
     }
 }
 
+// Closes the listening socket and every accepted session. Loop thread only.
+//
+// Sessions own themselves and are freed by their own close callback; the
+// listening socket's data points at this daemon, so it must not take that path.
+void GpuDaemon::close_sockets() {
+    uv_walk(&loop_, [](uv_handle_t* handle, void* arg) {
+        auto* self = static_cast<GpuDaemon*>(arg);
+        if (uv_is_closing(handle) || handle->type != UV_TCP) return;
+
+        if (handle == reinterpret_cast<uv_handle_t*>(&self->server_socket_)) {
+            uv_close(handle, nullptr);
+        } else {
+            uv_close(handle, GpuSession::on_close_handle);
+        }
+    }, this);
+}
+
 GpuDaemon::~GpuDaemon() {
-    stop();
-    uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
+    // Close directly rather than signalling stop_async_: by this point the loop
+    // is not running, so the async callback would never fire and the still-open
+    // listening socket would block the drain below forever.
+    close_sockets();
+
+    if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
+        uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
+    }
+
+    is_running_ = false;
+
     uv_run(&loop_, UV_RUN_DEFAULT); // Drain remaining closing handles
     uv_loop_close(&loop_);
 }

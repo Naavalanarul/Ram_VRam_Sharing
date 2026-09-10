@@ -19,6 +19,8 @@ public:
 
 private:
     static void on_connection(uv_stream_t* server, int status);
+    // Closes the listening socket and all accepted sessions. Loop thread only.
+    void close_sockets();
 
     Config config_;
     uv_loop_t loop_;

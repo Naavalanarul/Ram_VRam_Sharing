@@ -1,4 +1,9 @@
 #!/bin/bash
+#
+# Manual local-cluster helper. The automated end-to-end test no longer uses
+# this script: integration/test_cluster.cpp drives the same daemons through
+# libuv so it runs on Windows too. Kept for hands-on runs on POSIX, where it is
+# handy to leave the cluster up and poke at it.
 set -e
 
 echo "======================================"

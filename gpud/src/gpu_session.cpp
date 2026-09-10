@@ -20,7 +20,7 @@ GpuSession::GpuSession(uv_loop_t* loop, uv_stream_t* server, ICudaExecutor* exec
     if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&socket_)) == 0) {
         uv_read_start(reinterpret_cast<uv_stream_t*>(&socket_), on_alloc, on_read);
     } else {
-        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+        uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
     }
 }
 
@@ -47,14 +47,14 @@ void GpuSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf
             spdlog::error("GpuSession {} read error: {}", self->session_id_, uv_strerror(static_cast<int>(nread)));
         }
         if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(stream))) {
-            uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close);
+            uv_close(reinterpret_cast<uv_handle_t*>(stream), on_close_handle);
         }
     }
     
     if (buf->base) delete[] buf->base;
 }
 
-void GpuSession::on_close(uv_handle_t* handle) {
+void GpuSession::on_close_handle(uv_handle_t* handle) {
     auto* self = static_cast<GpuSession*>(handle->data);
     delete self;
 }
@@ -65,7 +65,7 @@ void GpuSession::process_buffer() {
         if (size > MAX_MESSAGE_SIZE) {
             spdlog::error("GpuSession {} received oversized message", session_id_);
             if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&socket_))) {
-                uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+                uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
             }
             return;
         }
@@ -82,7 +82,7 @@ void GpuSession::handle_request(const uint8_t* data, size_t size) {
     auto response = GpuProtocol::process_request(executor_, data, size);
     if (response.empty()) {
         if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&socket_))) {
-            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close);
+            uv_close(reinterpret_cast<uv_handle_t*>(&socket_), on_close_handle);
         }
         return;
     }
