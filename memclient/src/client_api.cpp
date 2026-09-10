@@ -4,7 +4,6 @@
 #include <meminfo/platform/IMemoryMonitor.h>
 #include <meminfo/platform/ILocalIpc.h>
 #include <spdlog/spdlog.h>
-#include <unistd.h>
 #include <queue>
 #include <algorithm>
 #include <chrono>

@@ -4,11 +4,6 @@
 #include <fstream>
 #include <sstream>
 #include <cstdint>
-#include <unistd.h>
-
-#ifdef __linux__
-#include <unistd.h>
-#endif
 
 namespace meminfo {
 namespace discovery {
@@ -46,10 +41,14 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     // Generate UUID if not present (simple placeholder)
     local_id_ = generate_uuid();
     
+    // uv_os_gethostname() rather than POSIX gethostname(): <unistd.h> does not
+    // exist on MSVC, and the Windows equivalent lives in <winsock2.h> and needs
+    // WSAStartup first. libuv is already a dependency and handles both.
     local_hostname_ = "localhost";
-    char host_buf[256];
-    if (gethostname(host_buf, sizeof(host_buf)) == 0) {
-        local_hostname_ = host_buf;
+    char host_buf[UV_MAXHOSTNAMESIZE];
+    size_t host_len = sizeof(host_buf);
+    if (uv_os_gethostname(host_buf, &host_len) == 0) {
+        local_hostname_.assign(host_buf, host_len);
     }
     
     listen_address_ = config_.get<std::string>("discovery", "listen_address", "0.0.0.0");
