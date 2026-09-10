@@ -31,6 +31,15 @@ int exit_code_of(int wait_status) {
 } // namespace
 
 TEST(ClusterIntegrationTest, RunClusterScript) {
+#ifdef _WIN32
+    // The harness is a bash script driven through std::system(), which runs
+    // cmd.exe here: the `VAR=value command` prefix, the script itself, and its
+    // job-control based daemon teardown all have no cmd equivalent. It also
+    // addresses binaries as <build>/<target>/<name>, which only holds for a
+    // single-config generator -- MSVC puts them under <build>/<target>/Debug/.
+    // Skip rather than report a failure that says nothing about the code.
+    GTEST_SKIP() << "Cluster harness is a POSIX shell script; not runnable on Windows";
+#else
     // Point the script at the binaries this build actually produced rather than
     // letting it guess a build directory.
     std::string command = std::string("MEMINFO_BUILD_DIR='") + MEMINFO_BUILD_DIR +
@@ -41,4 +50,5 @@ TEST(ClusterIntegrationTest, RunClusterScript) {
 
     EXPECT_EQ(exit_code_of(status), 0)
         << "Cluster integration script failed (" << MEMINFO_CLUSTER_SCRIPT << ")";
+#endif
 }
