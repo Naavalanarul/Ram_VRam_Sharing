@@ -73,7 +73,9 @@ void HttpStatusServer::on_connection(uv_stream_t* server, int status) {
 
 void HttpStatusServer::on_alloc(uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* buf) {
     buf->base = new char[suggested];
-    buf->len = suggested;
+    // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+    // assignment narrows there; make the conversion explicit.
+    buf->len = static_cast<decltype(buf->len)>(suggested);
 }
 
 void HttpStatusServer::on_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {

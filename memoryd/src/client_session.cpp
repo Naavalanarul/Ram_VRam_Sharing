@@ -28,7 +28,9 @@ ClientSession::~ClientSession() {
 
 void ClientSession::on_alloc(uv_handle_t* /*handle*/, size_t suggested_size, uv_buf_t* buf) {
     buf->base = new char[suggested_size];
-    buf->len = suggested_size;
+    // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+    // assignment narrows there; make the conversion explicit.
+    buf->len = static_cast<decltype(buf->len)>(suggested_size);
 }
 
 void ClientSession::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {

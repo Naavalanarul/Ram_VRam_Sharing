@@ -122,7 +122,9 @@ TEST(PeerDisconnectTest, SessionCleanupOnDisconnect) {
         uv_read_start(reinterpret_cast<uv_stream_t*>(&client),
             [](uv_handle_t*, size_t suggested, uv_buf_t* b) {
                 b->base = new char[suggested];
-                b->len = suggested;
+                // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
+                // assignment narrows there; make the conversion explicit.
+                b->len = static_cast<decltype(b->len)>(suggested);
             },
             [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* b) {
                 auto* out = static_cast<std::vector<uint8_t>*>(stream->data);
