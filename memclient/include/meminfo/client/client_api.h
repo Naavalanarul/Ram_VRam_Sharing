@@ -97,7 +97,15 @@ private:
     void allocate_remote(handle_t handle, size_t size);  // Allocate on best peer(s) with fallback
     void free_remote(const RemoteAllocation& alloc);   // Free remote allocation (single or striped)
     void write_remote(const RemoteAllocation& alloc, size_t offset, const uint8_t* data, size_t size);
-    std::vector<uint8_t> read_remote(const RemoteAllocation& alloc, size_t offset, size_t size);
+    // release_after_read frees the remote allocation once it has been read,
+    // which is what load_to_local() wants (it is moving the block back).
+    // Direct range reads of a block that stays remote must pass false.
+    std::vector<uint8_t> read_remote(const RemoteAllocation& alloc, size_t offset, size_t size,
+                                     bool release_after_read = true);
+
+    // Fills out with the remote allocation for handle when that block is too
+    // large ever to sit in the local cache, so callers operate on it in place.
+    bool oversized_remote_alloc(handle_t handle, RemoteAllocation& out);
     
     // --- libuv thread methods ---
     void network_thread_main();

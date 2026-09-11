@@ -271,11 +271,35 @@ std::vector<uint8_t> MemoryClient::sync_remote_call(MemoryClient::RemotePeer* pe
     return future.get();
 }
 
+// Looks up handle's remote allocation, but only when the block is too large to
+// ever fit the local cache. Those blocks are read and written in place instead
+// of being pulled local, which would fail.
+bool MemoryClient::oversized_remote_alloc(handle_t handle, RemoteAllocation& out) {
+    std::lock_guard<std::mutex> lock(remote_mutex_);
+    auto it = remote_handles_.find(handle);
+    if (it == remote_handles_.end() || it->second.size <= cache_.max_size()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
 handle_t MemoryClient::allocate(size_t size) {
+    handle_t handle = next_local_handle_++;
+
+    // A block larger than the whole local cache can never be stored in it.
+    // Place it on a peer instead: LRUCache::put() would refuse it, and the
+    // caller would be handed a handle that resolves to nothing.
+    if (size > cache_.max_size()) {
+        allocate_remote(handle, size); // throws if no peer can take it
+        return handle;
+    }
+
     evict_if_needed(size);
     std::vector<uint8_t> initial_data(size, 0);
-    handle_t handle = next_local_handle_++;
-    cache_.put(handle, std::move(initial_data), false);
+    if (!cache_.put(handle, std::move(initial_data), false)) {
+        throw std::runtime_error("Failed to cache allocation locally");
+    }
     return handle;
 }
 
@@ -509,7 +533,8 @@ void MemoryClient::write_remote(const RemoteAllocation& alloc, size_t offset, co
     }
 }
 
-std::vector<uint8_t> MemoryClient::read_remote(const RemoteAllocation& alloc, size_t offset, size_t size) {
+std::vector<uint8_t> MemoryClient::read_remote(const RemoteAllocation& alloc, size_t offset, size_t size,
+                                               bool release_after_read) {
     std::vector<uint8_t> result(size);
     
     if (alloc.is_striped) {
@@ -553,7 +578,11 @@ std::vector<uint8_t> MemoryClient::read_remote(const RemoteAllocation& alloc, si
                     std::copy(stripe_data.begin(), stripe_data.end(), result.begin() + result_offset);
                     result_offset += stripe_read_size;
                     
-                    // Free from remote after read
+                    // Free from remote after read, unless the caller is
+                    // reading a range of a block that stays remote.
+                    if (!release_after_read) {
+                        continue;
+                    }
                     req_id = next_request_id_++;
                     builder.Clear();
                     meminfo::memory::MemoryRequestBuilder mrb2(builder);
@@ -597,7 +626,11 @@ std::vector<uint8_t> MemoryClient::read_remote(const RemoteAllocation& alloc, si
         
         std::vector<uint8_t> data(resp->data()->begin(), resp->data()->end());
         result = std::move(data);
-        
+
+        if (!release_after_read) {
+            return result;
+        }
+
         // Free from remote after read
         req_id = next_request_id_++;
         builder.Clear();
@@ -633,8 +666,16 @@ std::vector<uint8_t> MemoryClient::read(handle_t handle, size_t offset, size_t s
         return std::vector<uint8_t>(local_opt->begin() + offset, local_opt->begin() + offset + size);
     }
     
+    // Too large to cache: read the range straight off the peer and leave the
+    // block where it is.
+    RemoteAllocation remote;
+    if (oversized_remote_alloc(handle, remote)) {
+        if (offset > remote.size || size > remote.size - offset) throw std::out_of_range("Read out of bounds");
+        return read_remote(remote, offset, size, /*release_after_read=*/false);
+    }
+
     load_to_local(handle); // Throws if invalid handle
-    
+
     local_opt = cache_.get(handle);
     if (!local_opt) throw std::runtime_error("Failed to load block from remote");
     if (offset > local_opt->size() || size > local_opt->size() - offset) throw std::out_of_range("Read out of bounds");
@@ -650,8 +691,16 @@ void MemoryClient::write(handle_t handle, size_t offset, const std::vector<uint8
         return;
     }
     
+    // Too large to cache: write the range straight to the peer.
+    RemoteAllocation remote;
+    if (oversized_remote_alloc(handle, remote)) {
+        if (offset > remote.size || data.size() > remote.size - offset) throw std::out_of_range("Write out of bounds");
+        write_remote(remote, offset, data.data(), data.size());
+        return;
+    }
+
     load_to_local(handle);
-    
+
     local_opt = cache_.get(handle);
     if (!local_opt) throw std::runtime_error("Failed to load block from remote");
     if (offset > local_opt->size() || data.size() > local_opt->size() - offset) throw std::out_of_range("Write out of bounds");
