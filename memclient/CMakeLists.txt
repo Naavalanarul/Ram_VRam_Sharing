@@ -16,11 +16,15 @@ target_link_libraries(memclient_cli PRIVATE memclient_lib CLI11::CLI11)
 meminfo_set_strict_warnings(memclient_cli)
 
 # Tests
-add_executable(test_memclient
-    tests/test_lru_cache.cpp
-    tests/test_client_api.cpp
-)
-target_link_libraries(test_memclient PRIVATE memclient_lib memoryd_lib GTest::gtest_main GTest::gtest GTest::gmock)
-meminfo_set_strict_warnings(test_memclient)
+if(MEMINFO_BUILD_TESTS)
+    add_executable(test_memclient
+        tests/test_lru_cache.cpp
+        tests/test_client_api.cpp
+    )
+    target_link_libraries(test_memclient PRIVATE memclient_lib memoryd_lib GTest::gtest_main GTest::gtest GTest::gmock)
+    meminfo_set_strict_warnings(test_memclient)
 
-add_test(NAME test_memclient COMMAND test_memclient)
+    # Registers one ctest entry per GoogleTest case, as every other test target
+    # here does, so a failure names the case instead of just the binary.
+    gtest_discover_tests(test_memclient)
+endif()
