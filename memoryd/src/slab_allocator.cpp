@@ -47,6 +47,12 @@ std::vector<size_t> SlabAllocator::allocate_pages(size_t count) {
         size_t p = free_list_.back();
         free_list_.pop_back();
         page_states_[p] = PageState::ALLOCATED;
+
+        // Clear before handing the page out. Pages are recycled between
+        // handles and between sessions, so without this a new allocation
+        // reads whatever the previous owner left there.
+        std::memset(buffer_ + (p * page_size_), 0, page_size_);
+
         pages.push_back(p);
     }
     return pages;

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
+#include <algorithm>
 
 using namespace meminfo;
 using namespace meminfo::client;
@@ -64,6 +65,71 @@ TEST(MemoryClientTest, EvictionAndReadback) {
     client.free(h1);
     client.free(h2);
     
+    daemon->stop();
+    daemon_thread.join();
+}
+
+// A block larger than the entire local cache cannot be stored there. It used to
+// be dropped silently -- LRUCache::put() refuses it and allocate() ignored the
+// result -- so the caller got a handle that resolved to nothing and the next
+// access failed with "Invalid handle or block not found". It must live on a
+// peer and be readable and writable in place.
+TEST(MemoryClientTest, AllocationLargerThanLocalCacheLivesRemotely) {
+    std::string config_path = (std::filesystem::temp_directory_path() / "meminfo_test_oversized.toml").string();
+    std::ofstream out(config_path);
+    out << "[memory]\n"
+        << "listen_address = \"127.0.0.1\"\n"
+        << "port = 0\n"
+        << "total_reserved_bytes = 1048576\n"
+        << "page_size_bytes = 4096\n";
+    out.close();
+
+    Config config(config_path);
+    auto daemon = std::make_unique<MemoryDaemon>(config);
+    std::thread daemon_thread([&]() { daemon->run(); });
+
+    int port = 0;
+    for (int i = 0; i < 200 && port == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        port = daemon->get_listen_port();
+    }
+    ASSERT_NE(port, 0) << "memoryd did not bind a port";
+
+    {
+        // 512-byte local cache, 4096-byte allocation: far too big to cache.
+        MemoryClient client(512, "", "127.0.0.1", port);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        constexpr size_t kSize = 4096;
+        meminfo::handle_t h = client.allocate(kSize);
+
+        // Freshly allocated remote pages must read back as zeros, not as
+        // whatever the previous owner of those pages left behind.
+        auto zeros = client.read(h, 0, kSize);
+        ASSERT_EQ(zeros.size(), kSize);
+        EXPECT_EQ(std::count(zeros.begin(), zeros.end(), 0), static_cast<long>(kSize));
+
+        // Write a range in place and read it back.
+        std::vector<uint8_t> payload(1024, 0x5A);
+        client.write(h, 2048, payload);
+
+        auto got = client.read(h, 2048, payload.size());
+        EXPECT_EQ(got, payload);
+
+        // A neighbouring range must be untouched.
+        auto before = client.read(h, 1024, 16);
+        EXPECT_EQ(std::count(before.begin(), before.end(), 0), 16);
+
+        // Repeated reads must keep working: the block stays remote rather than
+        // being freed by the first read.
+        auto again = client.read(h, 2048, payload.size());
+        EXPECT_EQ(again, payload);
+
+        EXPECT_THROW(client.read(h, kSize - 8, 16), std::out_of_range);
+
+        client.free(h);
+    }
+
     daemon->stop();
     daemon_thread.join();
 }
