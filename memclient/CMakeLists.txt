@@ -5,6 +5,7 @@ add_library(memclient_lib STATIC
     src/lru_cache.cpp
     src/client_api.cpp
     src/remote_heap.cpp
+    src/heap_arena.cpp
 )
 
 target_include_directories(memclient_lib PUBLIC include)
@@ -22,6 +23,7 @@ if(MEMINFO_BUILD_TESTS)
         tests/test_lru_cache.cpp
         tests/test_client_api.cpp
         tests/test_remote_heap.cpp
+        tests/test_heap_arena.cpp
     )
     target_link_libraries(test_memclient PRIVATE memclient_lib memoryd_lib GTest::gtest_main GTest::gtest GTest::gmock)
     meminfo_set_strict_warnings(test_memclient)

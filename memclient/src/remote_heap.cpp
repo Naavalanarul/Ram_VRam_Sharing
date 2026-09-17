@@ -13,7 +13,18 @@ namespace {
 size_t round_up(size_t value, size_t multiple) {
     return ((value + multiple - 1) / multiple) * multiple;
 }
+
+// Per-thread, because a fault is serviced on whichever thread took it: on
+// Windows the vectored handler runs on the faulting thread itself.
+thread_local int g_fault_depth = 0;
+
+struct FaultScope {
+    FaultScope() { ++g_fault_depth; }
+    ~FaultScope() { --g_fault_depth; }
+};
 } // namespace
+
+bool RemoteHeap::servicing_fault() { return g_fault_depth > 0; }
 
 RemoteHeap::RemoteHeap(MemoryClient& client, const RemoteHeapConfig& config)
     : client_(client) {
@@ -97,6 +108,8 @@ size_t RemoteHeap::page_index_of(const void* addr) const {
 }
 
 void RemoteHeap::handle_fault(const platform::FaultInfo& info) {
+    const FaultScope scope;
+
     const auto* addr = static_cast<const uint8_t*>(info.addr);
     if (addr < base_ || addr >= base_ + capacity_) {
         return; // not ours; the backend passes the fault on when nothing resolves it

@@ -77,6 +77,16 @@ public:
     // contents are on the peer and nothing is held locally.
     void flush_and_evict_all();
 
+    // True while the calling thread is inside a fault handler.
+    //
+    // Servicing a fault means buffering a page and talking to the peer, which
+    // allocates. A malloc interposer that routes large allocations into a
+    // RemoteHeap must send those allocations to the real allocator while this
+    // is set: otherwise servicing a fault allocates out of the very heap it is
+    // servicing, touches the new pages, faults again, and recurses until the
+    // stack is gone.
+    static bool servicing_fault();
+
 private:
     void handle_fault(const platform::FaultInfo& info);
     // Evicts oldest-first until resident bytes fit the budget. heap_mutex_ held.

@@ -89,6 +89,9 @@ add_subdirectory(memclient)
 add_subdirectory(gpud)
 add_subdirectory(tools)
 
+# Windows-only malloc interposer; the subdirectory is a no-op elsewhere.
+add_subdirectory(hook)
+
 if(MEMINFO_BUILD_TESTS)
     add_subdirectory(integration)
 endif()

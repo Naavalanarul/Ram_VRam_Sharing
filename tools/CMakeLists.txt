@@ -15,3 +15,15 @@ if(WIN32)
 endif()
 
 meminfo_set_strict_warnings(remote_heap_probe)
+
+# ──────────────────────────────────────────────
+# Phase 0 validation probe (Windows only)
+#
+# Standalone by design -- it links nothing from this project, so it still
+# answers "does the technique work on this machine?" even if everything else
+# fails to build.
+# ──────────────────────────────────────────────
+if(WIN32)
+    add_executable(win_veh_probe win_veh_probe.cpp)
+    meminfo_set_strict_warnings(win_veh_probe)
+endif()
