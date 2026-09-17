@@ -23,10 +23,12 @@
 #include <meminfo/common/logging.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 

@@ -95,7 +95,9 @@ void log_line(const char* fmt, ...) {
 
 std::string env_string(const char* name, const std::string& fallback) {
     char buf[1024];
-    const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+    // sizeof is size_t; the parameter is a 32-bit DWORD. The cast is explicit
+    // because MSVC reports the narrowing as C4267 and /WX makes it fatal.
+    const DWORD n = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
     if (n == 0 || n >= sizeof(buf)) return fallback;
     return std::string(buf, n);
 }
