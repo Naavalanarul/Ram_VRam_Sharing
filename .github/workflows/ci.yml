@@ -2,9 +2,15 @@ name: MemInfo CI
 
 on:
   push:
-    branches: [ main ]
+    # claude/** is included so the Windows-only targets -- the Detours hook DLL
+    # and the page-fault probe -- get compiled on a real toolchain while the
+    # work is still on a branch. They cannot be built on Linux at all, so
+    # waiting for a merge to main would mean their first compile happens on the
+    # demo machine.
+    branches: [ main, 'claude/**' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -31,3 +37,49 @@ jobs:
     - name: Test
       working-directory: build
       run: ctest --output-on-failure -C Debug
+
+    # Phase 0's first question -- can a PAGE_NOACCESS page be trapped by a
+    # vectored handler, made accessible, and the faulting instruction resumed --
+    # answered on a clean Windows image. A failure here means the code is wrong,
+    # not that the machine is unusual, which is exactly what makes it worth
+    # running in CI. It is NOT a substitute for running the probe on the demo
+    # laptop: security software and debuggers change the answer, and neither is
+    # present on a runner.
+    - name: Page-fault technique probe (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $probe = Get-ChildItem -Path build -Filter win_veh_probe.exe -Recurse |
+                 Select-Object -First 1
+        if (-not $probe) { throw "win_veh_probe.exe was not built" }
+        Write-Host "Running $($probe.FullName)"
+        & $probe.FullName
+        if ($LASTEXITCODE -ne 0) { throw "probe failed with exit code $LASTEXITCODE" }
+
+    # The hook DLL and its launcher are the only artifacts here that cannot be
+    # produced on any other platform, so fail loudly if a build silently
+    # stopped emitting them.
+    - name: Confirm the hook artifacts exist (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        foreach ($name in @('meminfo_hook.dll', 'meminfo_launch.exe')) {
+          $found = Get-ChildItem -Path build -Filter $name -Recurse | Select-Object -First 1
+          if (-not $found) { throw "$name was not built" }
+          Write-Host "$name -> $($found.FullName)"
+        }
+
+    - name: Upload the Windows hook artifacts
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: meminfo-windows-hook
+        if-no-files-found: error
+        path: |
+          build/**/meminfo_hook.dll
+          build/**/meminfo_launch.exe
+          build/**/win_veh_probe.exe
+          build/**/remote_heap_probe.exe
+          build/**/memoryd.exe
+          build/**/discoveryd.exe
+          build/**/memclient_cli.exe

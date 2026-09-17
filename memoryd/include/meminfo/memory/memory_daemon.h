@@ -6,6 +6,7 @@
 #include <meminfo/common/config.h>
 #include <meminfo/memory/slab_allocator.h>
 #include <meminfo/memory/page_tracker.h>
+#include <meminfo/memory/memory_control.h>
 #include <meminfo/common/signal_handler.h>
 
 namespace meminfo {
@@ -20,6 +21,9 @@ public:
     void stop();
     int get_listen_port() const { return listen_port_; }
 
+    // Name of the local control socket, or empty when disabled.
+    const std::string& get_control_socket_name() const { return control_socket_name_; }
+
 private:
     static void on_connection(uv_stream_t* server, int status);
     // Closes the listening socket and all accepted sessions. Loop thread only.
@@ -31,6 +35,8 @@ private:
     
     std::unique_ptr<SlabAllocator> allocator_;
     std::unique_ptr<PageTracker> page_tracker_;
+    std::unique_ptr<MemoryControlSocket> control_socket_;
+    std::string control_socket_name_;
     
     uv_tcp_t server_socket_;
     uint64_t next_session_id_ = 1;

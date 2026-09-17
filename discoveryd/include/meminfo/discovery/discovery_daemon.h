@@ -7,6 +7,7 @@
 #include <meminfo/discovery/announcer.h>
 #include <meminfo/discovery/listener.h>
 #include <meminfo/discovery/control_socket.h>
+#include <meminfo/discovery/pool_probe.h>
 #include <meminfo/common/signal_handler.h>
 #include <meminfo/platform/IMemoryMonitor.h>
 
@@ -47,6 +48,7 @@ private:
     std::unique_ptr<ControlSocket> control_socket_;
     std::unique_ptr<SignalHandler> sig_handler_;
     std::unique_ptr<platform::IMemoryMonitor> memory_monitor_;
+    std::unique_ptr<PoolProbe> pool_probe_;
     
     bool is_running_ = false;
     bool pool_joined_ = true;  // Default to joined for backward compatibility
@@ -63,6 +65,10 @@ private:
     uint64_t free_vram_ = 0;
     
     void update_announcer_state();
+
+    // Capacity to announce: memoryd's remaining pool when its control socket
+    // answers, otherwise the OS free-RAM figure.
+    uint64_t current_free_ram() const;
 };
 
 } // namespace discovery

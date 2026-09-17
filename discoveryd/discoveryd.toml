@@ -20,3 +20,8 @@ announce_interval_ms = 1000
 
 # Time before a peer is considered stale and eventually evicted
 peer_ttl_seconds = 10
+
+# memoryd's control socket on this machine. Must match memoryd.toml's
+# control_socket. When set, announced free_ram is memoryd's remaining pool
+# rather than the operating system's free-RAM figure.
+memory_control_socket = "meminfo_memory_ctl"

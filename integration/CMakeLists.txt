@@ -21,3 +21,30 @@ add_dependencies(test_cluster discoveryd memoryd gpud memclient_cli)
 meminfo_set_strict_warnings(test_cluster)
 
 add_test(NAME test_cluster COMMAND test_cluster)
+
+# ──────────────────────────────────────────────
+# Two-node placement test
+#
+# Links memclient_lib so a real MemoryClient runs in-process against two
+# spawned discoveryd+memoryd pairs, rather than driving memclient_cli's fixed
+# workload from the outside.
+# ──────────────────────────────────────────────
+add_executable(test_two_node tests/test_full_cluster.cpp)
+
+target_link_libraries(test_two_node PRIVATE
+    memclient_lib
+    meminfo_common
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_compile_definitions(test_two_node PRIVATE
+    MEMINFO_DISCOVERYD_EXE="$<TARGET_FILE:discoveryd>"
+    MEMINFO_MEMORYD_EXE="$<TARGET_FILE:memoryd>"
+)
+
+add_dependencies(test_two_node discoveryd memoryd)
+
+meminfo_set_strict_warnings(test_two_node)
+
+gtest_discover_tests(test_two_node)
