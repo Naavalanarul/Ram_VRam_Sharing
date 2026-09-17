@@ -1,0 +1,24 @@
+LIBRARY "cudart64_12.dll"
+
+EXPORTS
+cudaMalloc @1
+cudaFree @2
+cudaMemcpy @3
+cudaDeviceSynchronize @4
+cudaGetLastError @5
+cudaGetErrorString @6
+cudaMallocHost @7
+cudaFreeHost @8
+cudaHostAlloc @9
+cudaHostGetDevicePointer @10
+cudaStreamCreate @11
+cudaStreamDestroy @12
+cudaStreamSynchronize @13
+cudaMemcpyAsync @14
+cudaDeviceGetAttribute @15
+cudaGetDeviceCount @16
+cudaSetDevice @17
+cudaGetDevice @18
+cudaDeviceGetName @19
+cudaDriverGetVersion @20
+cudaRuntimeGetVersion @21
