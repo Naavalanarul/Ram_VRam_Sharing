@@ -10,15 +10,25 @@ endif()
 # Microsoft Detours
 #
 # Detours ships an nmake makefile rather than a CMake build, so the library is
-# declared here from its sources. disasm.cpp #includes the per-architecture
-# disassemblers itself, which is why they are not listed separately.
+# declared here from its sources. The five listed below are what an in-process
+# hook needs, matching src/Makefile minus its disol* objects.
+#
+# Two files are deliberately absent:
+#   uimports.cpp   is #included by creatwth.cpp, so compiling it separately
+#                  would define its symbols twice.
+#   disol*.cpp     are one-line wrappers that re-include disasm.cpp under a
+#                  DETOURS_*_OFFLINE_LIBRARY define, producing disassemblers for
+#                  architectures other than the host. They exist for tools that
+#                  inspect foreign binaries; DetourAttach only ever uses the
+#                  native disasm.cpp, and nothing here references the offline
+#                  entry points.
 # ──────────────────────────────────────────────
 include(FetchContent)
 
 FetchContent_Declare(
     detours
     GIT_REPOSITORY https://github.com/microsoft/Detours.git
-    GIT_TAG        4b8c659f549b0ab21cf649377c7a84eb708f5e68 # v4.0.1
+    GIT_TAG        e4bfd6b03e50de46b47abfbd1e46b384f0c5f833 # v4.0.1
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(detours)
@@ -56,6 +66,14 @@ target_link_libraries(meminfo_hook
 set_target_properties(meminfo_hook PROPERTIES OUTPUT_NAME "meminfo_hook" PREFIX "")
 
 meminfo_set_strict_warnings(meminfo_hook)
+
+# The DLL writes its log with fopen/vfprintf, which MSVC reports as deprecated
+# (C4996) and which /WX would then turn into a build failure. The secure
+# variants buy nothing here: the format strings are all literals in this file
+# and the path comes from the operator's own environment.
+if(MSVC)
+    target_compile_definitions(meminfo_hook PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # ──────────────────────────────────────────────
 # The launcher
