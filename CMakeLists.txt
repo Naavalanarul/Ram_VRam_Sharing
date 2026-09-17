@@ -87,6 +87,7 @@ add_subdirectory(discoveryd)
 add_subdirectory(memoryd)
 add_subdirectory(memclient)
 add_subdirectory(gpud)
+add_subdirectory(tools)
 
 if(MEMINFO_BUILD_TESTS)
     add_subdirectory(integration)

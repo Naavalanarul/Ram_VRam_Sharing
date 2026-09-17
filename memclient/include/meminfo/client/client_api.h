@@ -38,6 +38,11 @@ public:
     // Write data to a handle. Will push to remote if evicted or load into local cache.
     void write(handle_t handle, size_t offset, const std::vector<uint8_t>& data);
 
+    // Ceiling on what the local cache holds. A block larger than this can never
+    // sit locally, so it is placed on a peer and read and written in place --
+    // which is what RemoteHeap relies on to keep its backing store remote.
+    size_t max_local_bytes() const { return cache_.max_size(); }
+
 private:
     struct RemotePeer {
         MemoryClient* client = nullptr;
