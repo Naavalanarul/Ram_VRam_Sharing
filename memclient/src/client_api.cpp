@@ -76,35 +76,84 @@ MemoryClient::MemoryClient(size_t max_local_bytes, const std::string& discovery_
     });
     wakeup_async_.data = this;
     
+    uv_async_init(&loop_, &connect_async_, [](uv_async_t* handle) {
+        static_cast<MemoryClient*>(handle->data)->drain_pending_connects();
+    });
+    connect_async_.data = this;
+
     if (!test_ip.empty() && test_port > 0) {
-        add_peer_and_connect(test_ip, test_port);
+        // Direct-peer mode: no discoveryd to poll, so no discovery thread.
+        bool created = false;
+        start_connect(ensure_peer(test_ip, test_port, created));
     } else {
         connect_to_peers();
+        // The loop is not running yet, so nothing would service connect_async_.
+        // Open the queued sockets here instead; uv_tcp_connect only queues the
+        // attempt, which the uv_run() on the network thread then drives.
+        drain_pending_connects();
     }
     
     network_thread_ = std::thread(&MemoryClient::network_thread_main, this);
+
+    if (test_ip.empty() || test_port <= 0) {
+        discovery_running_ = true;
+        discovery_thread_ = std::thread(&MemoryClient::discovery_loop, this);
+    }
 }
 
-void MemoryClient::add_peer_and_connect(const std::string& ip, int port) {
+MemoryClient::RemotePeer* MemoryClient::ensure_peer(const std::string& ip, int port, bool& created) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    for (auto& existing : peers_) {
+        if (existing->ip == ip && existing->port == port) {
+            created = false;
+            return existing.get();
+        }
+    }
+
     auto peer = std::make_unique<RemotePeer>();
     peer->client = this;
     peer->ip = ip;
     peer->port = port;
-    
-    peer->socket = new uv_tcp_t;
-    uv_tcp_init(&loop_, peer->socket);
-    peer->socket->data = peer.get();
-    
+
+    RemotePeer* raw = peer.get();
+    // Peers are only ever appended, never erased: RemoteAllocation holds raw
+    // RemotePeer pointers, and the vector reallocating moves the unique_ptrs
+    // rather than the objects they own, so those pointers stay valid.
+    peers_.push_back(std::move(peer));
+    created = true;
+    return raw;
+}
+
+void MemoryClient::start_connect(RemotePeer* peer) {
+    if (!peer || peer->socket) {
+        return; // already connected, or an attempt is already in flight
+    }
+
+    auto* socket = new uv_tcp_t;
+    if (uv_tcp_init(&loop_, socket) != 0) {
+        delete socket;
+        return;
+    }
+    socket->data = peer;
+    peer->socket = socket;
+
     struct sockaddr_in dest;
-    uv_ip4_addr(peer->ip.c_str(), peer->port, &dest);
-    
-    uv_connect_t* conn = new uv_connect_t;
-    conn->data = peer.get();
-    uv_tcp_connect(conn, peer->socket, reinterpret_cast<const struct sockaddr*>(&dest), [](uv_connect_t* req, int status) {
+    if (uv_ip4_addr(peer->ip.c_str(), peer->port, &dest) != 0) {
+        spdlog::warn("Peer {}:{} has an unusable address", peer->ip, peer->port);
+        peer->socket = nullptr;
+        uv_close(reinterpret_cast<uv_handle_t*>(socket),
+                 [](uv_handle_t* h) { delete reinterpret_cast<uv_tcp_t*>(h); });
+        return;
+    }
+
+    auto* conn = new uv_connect_t;
+    conn->data = peer;
+    int rc = uv_tcp_connect(conn, socket, reinterpret_cast<const struct sockaddr*>(&dest),
+                            [](uv_connect_t* req, int status) {
         auto* p = static_cast<MemoryClient::RemotePeer*>(req->data);
         if (status == 0) {
             p->connected = true;
-            uv_read_start(reinterpret_cast<uv_stream_t*>(p->socket), 
+            uv_read_start(reinterpret_cast<uv_stream_t*>(p->socket),
                 [](uv_handle_t*, size_t suggested, uv_buf_t* b) {
                     b->base = new char[suggested];
                     // uv_buf_t::len is size_t on Unix but a 32-bit ULONG on Windows, so this
@@ -112,14 +161,87 @@ void MemoryClient::add_peer_and_connect(const std::string& ip, int port) {
                     b->len = static_cast<decltype(b->len)>(suggested);
                 },
                 MemoryClient::on_peer_read);
+        } else {
+            // Release the socket and clear it, so the next discovery round
+            // retries this peer instead of seeing an attempt still pending.
+            // Leaving it set is what made a peer that was briefly unreachable
+            // at startup unreachable for the life of the client.
+            spdlog::debug("Connect to peer {}:{} failed: {}", p->ip, p->port, uv_strerror(status));
+            uv_tcp_t* sock = p->socket;
+            p->socket = nullptr;
+            if (sock && !uv_is_closing(reinterpret_cast<uv_handle_t*>(sock))) {
+                uv_close(reinterpret_cast<uv_handle_t*>(sock),
+                         [](uv_handle_t* h) { delete reinterpret_cast<uv_tcp_t*>(h); });
+            }
         }
         delete req;
     });
-    
-    peers_.push_back(std::move(peer));
+
+    if (rc != 0) {
+        spdlog::warn("uv_tcp_connect to {}:{} failed: {}", peer->ip, peer->port, uv_strerror(rc));
+        delete conn;
+        peer->socket = nullptr;
+        uv_close(reinterpret_cast<uv_handle_t*>(socket),
+                 [](uv_handle_t* h) { delete reinterpret_cast<uv_tcp_t*>(h); });
+    }
+}
+
+void MemoryClient::drain_pending_connects() {
+    std::vector<RemotePeer*> batch;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        batch.swap(pending_connects_);
+    }
+    for (RemotePeer* peer : batch) {
+        start_connect(peer); // no-op for a peer that connected in the meantime
+    }
+}
+
+void MemoryClient::discovery_loop() {
+    while (discovery_running_.load(std::memory_order_acquire)) {
+        connect_to_peers();
+
+        // Sleep in slices so shutdown is not held up for a whole interval.
+        for (auto waited = std::chrono::milliseconds(0);
+             waited < DISCOVERY_INTERVAL && discovery_running_.load(std::memory_order_acquire);
+             waited += std::chrono::milliseconds(50)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+}
+
+std::vector<MemoryClient::RemotePeer*> MemoryClient::connected_peers() const {
+    std::vector<RemotePeer*> out;
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    for (const auto& peer : peers_) {
+        if (peer->connected) out.push_back(peer.get());
+    }
+    return out;
+}
+
+bool MemoryClient::wait_for_connected_peer(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto backoff = std::chrono::milliseconds(50);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!connected_peers().empty()) return true;
+        // discoveryd may have learned of a peer since the last round; ask again
+        // rather than waiting out the background thread's full interval.
+        connect_to_peers();
+        std::this_thread::sleep_for(backoff);
+        backoff = std::min(backoff * 2, std::chrono::milliseconds(400));
+    }
+    return !connected_peers().empty();
 }
 
 MemoryClient::~MemoryClient() {
+    // Discovery must stop before the loop does: it posts to connect_async_, and
+    // the stop callback is about to close that handle.
+    discovery_running_ = false;
+    if (discovery_thread_.joinable()) {
+        discovery_thread_.join();
+    }
+
     running_ = false;
     uv_async_send(&stop_async_);
     if (network_thread_.joinable()) {
@@ -141,87 +263,112 @@ void MemoryClient::network_thread_main() {
     uv_run(&loop_, UV_RUN_DEFAULT);
 }
 
-void MemoryClient::connect_to_peers() {
+std::vector<MemoryClient::PeerEndpoint> MemoryClient::query_discovery() {
+    std::vector<PeerEndpoint> out;
     auto ipc = platform::create_local_ipc();
-    
+
     flatbuffers::FlatBufferBuilder builder;
     meminfo::control::ControlRequestBuilder crb(builder);
     crb.add_command(meminfo::control::ControlCommand_LIST_PEERS);
     builder.FinishSizePrefixed(crb.Finish());
-    
+
     std::vector<uint8_t> req(builder.GetBufferPointer(), builder.GetBufferPointer() + builder.GetSize());
-    
+
     try {
         auto resp_buf = ipc->send_request(discovery_socket_, req);
-        if (!resp_buf.empty()) {
-            const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::control::ControlResponse>(resp_buf.data());
-            if (resp && resp->peers()) {
-                for (const auto* p : *resp->peers()) {
-                    if (p->memory_port() > 0 && p->address()) {
-                        add_peer_and_connect(p->address()->str(), p->memory_port());
-                    }
-                }
-            }
+        if (resp_buf.size() < sizeof(flatbuffers::uoffset_t)) {
+            return out; // discoveryd not reachable
+        }
+
+        // ControlResponse is not the schema's root_type, so there is no
+        // generated VerifySizePrefixed<...>Buffer helper for it. Verifying
+        // matters here as much as anywhere: the previous code called
+        // GetSizePrefixedRoot on whatever came back.
+        flatbuffers::Verifier verifier(resp_buf.data(), resp_buf.size());
+        if (!verifier.VerifySizePrefixedBuffer<meminfo::control::ControlResponse>(nullptr)) {
+            spdlog::warn("discoveryd returned a malformed peer list");
+            return out;
+        }
+
+        const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::control::ControlResponse>(resp_buf.data());
+        if (!resp->peers()) return out;
+
+        for (const auto* p : *resp->peers()) {
+            if (p->memory_port() == 0 || !p->address()) continue;
+            PeerEndpoint ep;
+            ep.ip = p->address()->str();
+            ep.port = p->memory_port();
+            ep.free_ram_bytes = p->free_ram_bytes();
+            ep.free_vram_bytes = p->free_vram_bytes();
+            out.push_back(std::move(ep));
         }
     } catch (const std::exception& e) {
         spdlog::debug("Failed to fetch peers: {}", e.what());
     }
+
+    return out;
+}
+
+void MemoryClient::connect_to_peers() {
+    const auto discovered = query_discovery();
+    if (discovered.empty()) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    bool queued = false;
+
+    for (const auto& ep : discovered) {
+        bool created = false;
+        RemotePeer* peer = ensure_peer(ep.ip, ep.port, created);
+        if (created) {
+            spdlog::info("Discovered peer {}:{}", ep.ip, ep.port);
+        }
+
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        peer->free_ram_bytes = ep.free_ram_bytes;
+        peer->free_vram_bytes = ep.free_vram_bytes;
+        peer->capacity_known = true;
+        peer->last_capacity_update = now;
+
+        // Queue anything not currently connected. Whether an attempt is
+        // already in flight is decided by start_connect() on the libuv thread,
+        // which owns peer->socket; a duplicate queue entry is a no-op there.
+        // This is also the reconnect path for a peer whose memoryd restarted.
+        if (!peer->connected) {
+            pending_connects_.push_back(peer);
+            queued = true;
+        }
+    }
+
+    if (queued) {
+        uv_async_send(&connect_async_);
+    }
 }
 
 void MemoryClient::refresh_peer_capacity() {
-    auto ipc = platform::create_local_ipc();
-    
-    flatbuffers::FlatBufferBuilder builder;
-    meminfo::control::ControlRequestBuilder crb(builder);
-    crb.add_command(meminfo::control::ControlCommand_LIST_PEERS);
-    builder.FinishSizePrefixed(crb.Finish());
-    
-    std::vector<uint8_t> req(builder.GetBufferPointer(), builder.GetBufferPointer() + builder.GetSize());
-    
-    try {
-        auto resp_buf = ipc->send_request(discovery_socket_, req);
-        if (!resp_buf.empty()) {
-            const auto* resp = flatbuffers::GetSizePrefixedRoot<meminfo::control::ControlResponse>(resp_buf.data());
-            if (resp && resp->peers()) {
-                auto now = std::chrono::steady_clock::now();
-                for (const auto* p : *resp->peers()) {
-                    if (p->memory_port() > 0 && p->address()) {
-                        std::string addr = p->address()->str();
-                        uint16_t port = p->memory_port();
-                        
-                        // Find matching peer
-                        for (auto& peer : peers_) {
-                            if (peer->ip == addr && peer->port == port) {
-                                peer->free_ram_bytes = p->free_ram_bytes();
-                                peer->free_vram_bytes = p->free_vram_bytes();
-                                peer->capacity_known = true;
-                                peer->last_capacity_update = now;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to refresh peer capacity: {}", e.what());
-    }
+    // One LIST_PEERS response carries both the peer list and their capacities,
+    // so refreshing capacity and picking up new peers is the same round-trip.
+    connect_to_peers();
 }
 
 MemoryClient::RemotePeer* MemoryClient::select_best_peer(size_t size_needed) {
     // Refresh capacity if TTL expired
-    auto now = std::chrono::steady_clock::now();
     bool need_refresh = true;
-    for (const auto& peer : peers_) {
-        if (peer->connected && peer->capacity_known &&
-            now - peer->last_capacity_update < PEER_CAPACITY_TTL) {
-            need_refresh = false;
-            break;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& peer : peers_) {
+            if (peer->connected && peer->capacity_known &&
+                now - peer->last_capacity_update < PEER_CAPACITY_TTL) {
+                need_refresh = false;
+                break;
+            }
         }
     }
     if (need_refresh) {
-        refresh_peer_capacity();
+        refresh_peer_capacity(); // blocking IPC: must not run under the lock
     }
+
+    std::lock_guard<std::mutex> lock(peers_mutex_);
     
     // Find the connected peer with the most free RAM that can fit the
     // allocation. A peer whose capacity discovery has not reported is a
@@ -304,22 +451,30 @@ handle_t MemoryClient::allocate(size_t size) {
 }
 
 void MemoryClient::allocate_remote(handle_t handle, size_t size) {
-    // Try to allocate on best peer, with fallback to other peers
-    std::vector<MemoryClient::RemotePeer*> candidates;
-    
-    // Get all connected peers sorted by free RAM (descending)
-    for (auto& peer : peers_) {
-        if (peer->connected) {
-            candidates.push_back(peer.get());
-        }
+    // A client that starts before its peers -- or before discoveryd has heard
+    // their first multicast announcement -- has nothing connected yet. Give
+    // discovery a few seconds rather than failing the first allocation with
+    // "out of memory on all peers" when there are simply no peers yet.
+    if (connected_peers().empty()) {
+        wait_for_connected_peer(PEER_WAIT_TIMEOUT);
     }
-    
+
+    // Try to allocate on best peer, with fallback to other peers.
     // Most free RAM first; peers whose capacity discovery has not reported sort
     // last but are still tried, since "unknown" is not the same as "full".
-    std::sort(candidates.begin(), candidates.end(), [](MemoryClient::RemotePeer* a, MemoryClient::RemotePeer* b) {
-        if (a->capacity_known != b->capacity_known) return a->capacity_known;
-        return a->free_ram_bytes > b->free_ram_bytes;
-    });
+    std::vector<MemoryClient::RemotePeer*> candidates;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (auto& peer : peers_) {
+            if (peer->connected) {
+                candidates.push_back(peer.get());
+            }
+        }
+        std::sort(candidates.begin(), candidates.end(), [](MemoryClient::RemotePeer* a, MemoryClient::RemotePeer* b) {
+            if (a->capacity_known != b->capacity_known) return a->capacity_known;
+            return a->free_ram_bytes > b->free_ram_bytes;
+        });
+    }
     
     RemoteAllocation alloc;
     alloc.size = size;
@@ -329,7 +484,12 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
     
     // First try: single peer allocation
     for (MemoryClient::RemotePeer* peer : candidates) {
-        if (peer->may_fit(size)) {
+        bool fits;
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            fits = peer->may_fit(size);
+        }
+        if (fits) {
             uint64_t req_id = next_request_id_++;
             flatbuffers::FlatBufferBuilder builder;
             meminfo::memory::MemoryRequestBuilder mrb(builder);
@@ -373,9 +533,13 @@ void MemoryClient::allocate_remote(handle_t handle, size_t size) {
             
             // An unknown-capacity peer is offered the whole remainder; the
             // daemon rejects what it cannot hold.
-            size_t chunk_size = peer->capacity_known
-                ? std::min<size_t>(remaining, static_cast<size_t>(peer->free_ram_bytes))
-                : remaining;
+            size_t chunk_size;
+            {
+                std::lock_guard<std::mutex> lock(peers_mutex_);
+                chunk_size = peer->capacity_known
+                    ? std::min<size_t>(remaining, static_cast<size_t>(peer->free_ram_bytes))
+                    : remaining;
+            }
             if (chunk_size == 0) continue;
             
             uint64_t req_id = next_request_id_++;

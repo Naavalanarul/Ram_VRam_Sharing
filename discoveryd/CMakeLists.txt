@@ -17,6 +17,7 @@ add_library(discoveryd_lib STATIC
     src/announcer.cpp
     src/listener.cpp
     src/control_socket.cpp
+    src/pool_probe.cpp
 )
 
 target_include_directories(discoveryd_lib

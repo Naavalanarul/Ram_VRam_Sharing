@@ -23,6 +23,18 @@ MemoryDaemon::MemoryDaemon(const Config& config)
     
     allocator_ = std::make_unique<SlabAllocator>(total_size, page_size);
     page_tracker_ = std::make_unique<PageTracker>(allocator_.get());
+
+    // Local control socket. discoveryd asks it for the pool's real occupancy so
+    // announcements describe this slab pool rather than the OS free-RAM figure.
+    //
+    // Off unless the config names a socket. The name is a machine-wide
+    // identifier (a filesystem path on POSIX, a named pipe on Windows), so a
+    // baked-in default would make two memoryd instances on one host fight over
+    // it -- which is exactly what the test suite runs.
+    control_socket_name_ = config_.get<std::string>("memory", "control_socket", "");
+    if (!control_socket_name_.empty()) {
+        control_socket_ = std::make_unique<MemoryControlSocket>(allocator_.get(), control_socket_name_);
+    }
     
     uv_tcp_init(&loop_, &server_socket_);
     server_socket_.data = this;
@@ -54,6 +66,11 @@ void MemoryDaemon::close_sockets() {
 }
 
 MemoryDaemon::~MemoryDaemon() {
+    // Before the loop teardown: the control socket runs its own accept thread,
+    // and it must be joined while allocator_ is still alive, since its handler
+    // reads the allocator.
+    control_socket_.reset();
+
     // Close everything here rather than signalling stop_async_: the loop is no
     // longer running by this point, so an async callback would never fire, and
     // the still-open listening socket would keep the drain below blocked
@@ -106,6 +123,11 @@ void MemoryDaemon::run() {
     }
     
     spdlog::info("memoryd listening on {}:{}", listen_addr, listen_port_);
+
+    if (control_socket_) {
+        control_socket_->start();
+    }
+
     is_running_ = true;
     
     uv_run(&loop_, UV_RUN_DEFAULT);

@@ -72,6 +72,17 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
     control_socket_ = std::make_unique<ControlSocket>(&peer_table_, sock_path, this);
     
     memory_monitor_ = platform::create_memory_monitor();
+
+    // Capacity announcements come from memoryd's own pool when its control
+    // socket is configured. Without one, the OS free-RAM figure is all there
+    // is -- which overstates what a client can actually place here.
+    std::string mem_ctl = config_.get<std::string>("discovery", "memory_control_socket", "");
+    pool_probe_ = std::make_unique<PoolProbe>(mem_ctl, static_cast<uint32_t>(interval_ms));
+    if (mem_ctl.empty()) {
+        spdlog::warn("discovery.memory_control_socket is unset: announcing OS free RAM, "
+                     "which does not reflect memoryd's remaining pool");
+    }
+
     
     sig_handler_ = std::make_unique<SignalHandler>(&loop_, [this]() {
         spdlog::info("Received termination signal");
@@ -81,6 +92,7 @@ DiscoveryDaemon::DiscoveryDaemon(const Config& config)
 
 DiscoveryDaemon::~DiscoveryDaemon() {
     stop();
+    if (pool_probe_) pool_probe_->stop();
     if (control_socket_) control_socket_->stop();
     if (listener_) listener_->stop();
     if (announcer_) announcer_->stop();
@@ -116,6 +128,12 @@ void DiscoveryDaemon::run() {
     
     announcer_->start();
     update_announcer_state();
+    if (pool_probe_) {
+        // One synchronous sample so the very first announcement already carries
+        // the pool figure instead of a second of OS free RAM.
+        pool_probe_->poll_once();
+        pool_probe_->start();
+    }
     listener_->start();
     control_socket_->start();
     
@@ -129,11 +147,8 @@ void DiscoveryDaemon::run() {
         auto* self = static_cast<DiscoveryDaemon*>(handle->data);
         self->peer_table_.tick();
         
-        uint64_t free_ram = 0;
-        if (self->memory_monitor_) {
-            free_ram = self->memory_monitor_->get_stats().free_bytes;
-        }
-        
+        uint64_t free_ram = self->current_free_ram();
+
         // Simple mock for VRAM
         uint64_t free_vram = 0; 
         
@@ -175,6 +190,19 @@ void DiscoveryDaemon::leave_pool() {
         spdlog::info("Left pool");
         update_announcer_state();
     }
+}
+
+uint64_t DiscoveryDaemon::current_free_ram() const {
+    // memoryd's remaining pool is the only figure that predicts whether an
+    // allocation sent here will be accepted, so prefer it whenever the probe
+    // has an answer.
+    if (pool_probe_ && pool_probe_->available()) {
+        return pool_probe_->free_bytes();
+    }
+    if (memory_monitor_) {
+        return memory_monitor_->get_stats().free_bytes;
+    }
+    return 0;
 }
 
 void DiscoveryDaemon::update_announcer_state() {

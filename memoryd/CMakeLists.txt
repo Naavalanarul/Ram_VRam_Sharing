@@ -8,6 +8,7 @@ add_executable(memoryd
     src/page_tracker.cpp
     src/memory_protocol.cpp
     src/client_session.cpp
+    src/memory_control.cpp
 )
 
 target_include_directories(memoryd
@@ -30,6 +31,7 @@ add_library(memoryd_lib STATIC
     src/page_tracker.cpp
     src/memory_protocol.cpp
     src/client_session.cpp
+    src/memory_control.cpp
 )
 
 target_include_directories(memoryd_lib

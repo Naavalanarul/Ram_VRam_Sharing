@@ -4,7 +4,11 @@ enum ControlCommand : uint8 {
   LIST_PEERS = 0,
   GET_LOCAL_STATUS = 1,
   JOIN_POOL = 2,
-  LEAVE_POOL = 3
+  LEAVE_POOL = 3,
+  // Asked of memoryd's control socket rather than discoveryd's: reports the
+  // daemon's real pool occupancy so capacity announcements describe the pool
+  // that allocations actually come out of, not raw OS free RAM.
+  GET_MEMORY_STATS = 4
 }
 
 enum PeerState : uint8 {
@@ -41,6 +45,10 @@ table ControlResponse {
   local_free_vram: uint64;
   pool_joined: bool;
   peer_count: uint32;
+  // GET_MEMORY_STATS response: memoryd's slab pool, in bytes.
+  pool_total_bytes: uint64;
+  pool_used_bytes: uint64;
+  pool_free_bytes: uint64;
 }
 
 root_type ControlRequest;

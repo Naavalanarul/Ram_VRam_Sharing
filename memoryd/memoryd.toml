@@ -12,3 +12,9 @@ total_reserved_bytes = 268435456
 # Size of a single memory slab/page
 # Default: 4KB
 page_size_bytes = 4096
+
+# Local control socket (Unix domain socket path on POSIX, named-pipe name on
+# Windows) that discoveryd queries for this pool's real occupancy. Leave unset
+# to disable it -- discoveryd then falls back to announcing OS free RAM, which
+# overstates what this node can actually accept.
+control_socket = "meminfo_memory_ctl"
