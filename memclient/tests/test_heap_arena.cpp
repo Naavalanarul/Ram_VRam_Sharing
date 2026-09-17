@@ -17,6 +17,14 @@ using meminfo::client::HeapArena;
 namespace {
 constexpr size_t kArenaBytes = 1u << 20; // 1 MiB of pretend address space
 
+// At namespace scope rather than inside the concurrency test, where MSVC
+// rejects a lambda reading them without an explicit capture (C3493). GCC and
+// Clang accept it -- a constexpr int used in a constant expression is not
+// odr-used, so no capture is required -- but this is not worth arguing with a
+// compiler over.
+constexpr int kThreads = 8;
+constexpr int kRounds = 400;
+
 // The arena never dereferences what it manages, so a fake base is enough and
 // keeps the test free of any real mapping.
 uint8_t* fake_base() {
@@ -119,8 +127,6 @@ TEST(HeapArenaTest, RejectsWhatItDoesNotOwn) {
 TEST(HeapArenaTest, SurvivesConcurrentUse) {
     HeapArena arena(fake_base(), kArenaBytes);
 
-    constexpr int kThreads = 8;
-    constexpr int kRounds = 400;
     std::atomic<int> failures{0};
 
     std::vector<std::thread> threads;

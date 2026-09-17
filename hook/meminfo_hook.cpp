@@ -31,6 +31,19 @@
 //   MEMINFO_LOG            path for this DLL's log        (default meminfo_hook.log
 //                                                          beside the executable)
 
+// <winsock2.h> before <windows.h>, and WIN32_LEAN_AND_MEAN so <windows.h>
+// does not reach for <winsock.h> on its own.
+//
+// This file is the one place in the tree where <windows.h> and libuv meet:
+// client_api.h pulls in uv.h, which on Windows includes <winsock2.h>. Plain
+// <windows.h> has already included the original <winsock.h> by then, and the
+// two headers declare the same ~50 structs and functions incompatibly, so the
+// second one in loses -- 90-odd C2011 and C2375 redefinition errors, ending in
+// a syntax error inside <deque> that points nowhere near the cause.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
 #include <windows.h>
 #include <detours.h>
 
